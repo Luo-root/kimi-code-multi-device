@@ -1,8 +1,8 @@
 package main
 
-// probe/setmode/main.go — 实测 ACP 会话级配置切换（设计文档 §18 命门 #1）
-// 验证 session/set_mode 与 session/set_config_option 是否可用、参数格式。
-// 运行：go run .\probe\setmode\main.go
+// probe/slash/main.go — 实测 slash 命令的 ACP 发送方式（设计文档 §18 #2）
+// 验证 session/prompt 发 "/status" 是否触发 Kimi 内置 slash 命令。
+// 运行：go run .\probe\slash\main.go
 
 import (
 	"bufio"
@@ -54,7 +54,7 @@ func (c *client) request(method string, params interface{}) (rpcMsg, bool) {
 	select {
 	case m := <-ch:
 		return m, true
-	case <-time.After(20 * time.Second):
+	case <-time.After(30 * time.Second):
 		return rpcMsg{}, false
 	}
 }
@@ -69,7 +69,7 @@ func (c *client) readLoop(r io.Reader) {
 		if err := json.Unmarshal([]byte(line), &m); err != nil {
 			continue
 		}
-		if m.ID != nil && m.Method == "" { // 这是给我们某个 request 的 response
+		if m.ID != nil && m.Method == "" {
 			if ch, ok := c.pend[*m.ID]; ok {
 				select {
 				case ch <- m:
@@ -77,18 +77,6 @@ func (c *client) readLoop(r io.Reader) {
 				}
 			}
 		}
-	}
-}
-
-func show(label string, m rpcMsg, ok bool) {
-	if !ok {
-		fmt.Printf("\n>>> %s: 无响应（超时）\n\n", label)
-		return
-	}
-	if len(m.Error) > 0 {
-		fmt.Printf("\n>>> %s: ERROR %s\n\n", label, string(m.Error))
-	} else {
-		fmt.Printf("\n>>> %s: OK %s\n\n", label, string(m.Result))
 	}
 }
 
@@ -111,46 +99,34 @@ func main() {
 	}()
 
 	wd, _ := os.Getwd()
-
-	// initialize
-	m, ok := c.request("initialize", map[string]interface{}{
-		"protocolVersion":    1,
-		"clientCapabilities": map[string]interface{}{},
-		"clientInfo":         map[string]interface{}{"name": "probe-set", "version": "0.1"},
+	c.request("initialize", map[string]interface{}{
+		"protocolVersion": 1, "clientCapabilities": map[string]interface{}{},
+		"clientInfo": map[string]interface{}{"name": "probe-slash", "version": "0.1"},
 	})
-	show("initialize", m, ok)
-
-	// session/new
-	m, ok = c.request("session/new", map[string]interface{}{
-		"cwd": wd, "mcpServers": []interface{}{},
-	})
-	show("session/new", m, ok)
+	m, _ := c.request("session/new", map[string]interface{}{"cwd": wd, "mcpServers": []interface{}{}})
 	var nr struct {
 		SessionID string `json:"sessionId"`
 	}
 	_ = json.Unmarshal(m.Result, &nr)
 	sid := nr.SessionID
-	fmt.Printf(">>> sessionId = %s\n", sid)
+	fmt.Printf(">>> sessionId = %s\n\n", sid)
 
-	// 命门 #1a：切 mode（参数名是 modeId，不是 mode）
-	m, ok = c.request("session/set_mode", map[string]interface{}{
-		"sessionId": sid, "modeId": "plan",
+	// 命门 #2：发 slash 命令 /status（只读，安全）
+	fmt.Println(">>> 发送 session/prompt，内容 = \"/status\"")
+	m, ok := c.request("session/prompt", map[string]interface{}{
+		"sessionId": sid,
+		"prompt":    []interface{}{map[string]interface{}{"type": "text", "text": "/status"}},
 	})
-	show("session/set_mode (plan)", m, ok)
+	if !ok {
+		fmt.Println(">>> session/prompt (/status): 无响应（超时）")
+	} else if len(m.Error) > 0 {
+		fmt.Printf(">>> session/prompt (/status): ERROR %s\n", string(m.Error))
+	} else {
+		fmt.Printf(">>> session/prompt (/status): OK %s\n", string(m.Result))
+	}
 
-	m, ok = c.request("session/set_mode", map[string]interface{}{
-		"sessionId": sid, "modeId": "default",
-	})
-	show("session/set_mode (default 切回)", m, ok)
-
-	// 命门 #1b：切 model（config option）
-	m, ok = c.request("session/set_config_option", map[string]interface{}{
-		"sessionId": sid, "configId": "model", "value": "myprovider/my-model",
-	})
-	show("session/set_config_option (model)", m, ok)
-
-	fmt.Println(">>> 实测完成。把上面每个 >>> 的 OK / ERROR 结果贴回来。")
-	time.Sleep(1 * time.Second)
+	time.Sleep(2 * time.Second)
+	fmt.Println("\n>>> 实测完成。看上面 /status 是被当 slash 命令执行了（返回会话状态），还是被当普通 prompt 处理了。")
 	_ = stdin.Close()
 	_ = cmd.Wait()
 }
