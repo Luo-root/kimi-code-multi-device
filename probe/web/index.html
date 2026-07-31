@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SENTINEL · relay 验证台</title>
+    <title>SENTINEL · relay 验证台 · 多会话</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
         :root{
             --ink0:#070b0e;--ink1:#0b1115;--ink2:#101a1f;--ink3:#16242a;--ink4:#1f333b;
             --teal:#2dd4bf;--teal-d:#0f766e;--amber:#f5a524;--coral:#ff5d5d;--green:#34d399;--sky:#38bdf8;
-            --txt:#e9f2f0;--dim:#97acaa;--faint:#5e7270;--line:rgba(124,164,160,.13);
+            --txt:#e9f2f0;--dim:#97acaa;--faint:#5e7270;--line:rgba(124,164,160,.13); --line2:rgba(124,164,160,.25);
             --disp:'Space Grotesk',sans-serif;--mono:'JetBrains Mono',monospace;--body:'IBM Plex Sans',sans-serif;
         }
         *{box-sizing:border-box;margin:0;padding:0}
@@ -18,38 +18,49 @@
         body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
             background:radial-gradient(800px 500px at 12% 0%,rgba(45,212,191,.08),transparent 60%),
             radial-gradient(700px 600px at 100% 100%,rgba(56,189,248,.05),transparent 60%),linear-gradient(180deg,#06090c,#0a0f13)}
-        .app{position:relative;z-index:1;display:grid;grid-template-columns:300px 1fr 320px;height:100vh}
+        .app{position:relative;z-index:1;display:grid;grid-template-columns:280px 1fr 320px;height:100vh}
         .col{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line)}
         .col:last-child{border-right:none}
-        .col-h{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint);padding:14px 16px 10px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
+        .col-h{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint);padding:13px 16px 9px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
         .col-h .live{width:7px;height:7px;border-radius:50%;background:var(--faint)}
         .col-h .live.on{background:var(--green);box-shadow:0 0 0 0 rgba(52,211,153,.5);animation:p 2s infinite}
         @keyframes p{0%{box-shadow:0 0 0 0 rgba(52,211,153,.5)}70%{box-shadow:0 0 0 7px rgba(52,211,153,0)}100%{box-shadow:0 0 0 0 rgba(52,211,153,0)}}
 
-        /* control column */
-        .ctrl{padding:14px 16px;overflow-y:auto;display:flex;flex-direction:column;gap:14px}
-        .brand{font-family:var(--disp);font-weight:700;font-size:15px;letter-spacing:.04em}
+        /* control */
+        .ctrl{padding:14px 16px;overflow-y:auto;display:flex;flex-direction:column;gap:13px}
+        .brand{font-family:var(--disp);font-weight:700;font-size:15px}
         .brand b{color:var(--teal)}
         .field label{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);display:block;margin-bottom:6px}
-        .sidbox{font-family:var(--mono);font-size:11px;color:var(--teal);background:var(--ink2);border:1px solid var(--line);border-radius:9px;padding:9px 11px;word-break:break-all;min-height:38px}
-        .sidbox.empty{color:var(--faint)}
         .btn{font-family:var(--body);font-weight:600;font-size:12.5px;padding:9px 12px;border-radius:10px;border:1px solid var(--line);background:var(--ink3);color:var(--txt);cursor:pointer;transition:.15s;width:100%}
         .btn:hover{background:var(--ink4);transform:translateY(-1px)}
         .btn:active{transform:scale(.98)}
         .btn.teal{background:var(--teal);color:#04201c;border-color:var(--teal)}
         .btn.teal:hover{background:#3ee0cb}
-        .row{display:flex;gap:7px}
-        .row .btn{flex:1}
+        .row{display:flex;gap:7px}.row .btn{flex:1}
         .modes{display:grid;grid-template-columns:1fr 1fr;gap:7px}
         .modes .btn{font-size:11px;padding:8px 6px}
         .modes .btn.sel{border-color:var(--teal);color:var(--teal);background:rgba(45,212,191,.08)}
-        .inp{width:100%;background:var(--ink2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;color:var(--txt);font-family:var(--body);font-size:13px;resize:vertical;min-height:64px}
+        .inp{width:100%;background:var(--ink2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;color:var(--txt);font-family:var(--body);font-size:13px;resize:vertical;min-height:60px}
         .inp:focus{outline:none;border-color:var(--teal-d)}
         .note{font-size:11px;color:var(--faint);line-height:1.5}
 
         /* stream column */
+        .mid{display:flex;flex-direction:column;min-height:0}
+        .tabsbar{display:flex;gap:6px;align-items:center;padding:9px 12px;border-bottom:1px solid var(--line);overflow-x:auto;scrollbar-width:none}
+        .tabsbar::-webkit-scrollbar{display:none}
+        .tab{flex:none;display:flex;align-items:center;gap:7px;padding:6px 11px;border-radius:9px;background:var(--ink2);border:1px solid var(--line);cursor:pointer;font-size:12px;color:var(--dim);white-space:nowrap;transition:.15s}
+        .tab:hover{color:var(--txt)}
+        .tab.active{background:var(--ink3);color:var(--txt);border-color:rgba(45,212,191,.4);box-shadow:inset 0 -2px 0 var(--teal)}
+        .tab .td{width:7px;height:7px;border-radius:50%;background:var(--green);flex:none}
+        .tab .td.wait{background:var(--coral);animation:p2 1.6s infinite}
+        @keyframes p2{0%{box-shadow:0 0 0 0 rgba(255,93,93,.5)}70%{box-shadow:0 0 0 6px rgba(255,93,93,0)}100%{box-shadow:0 0 0 0 rgba(255,93,93,0)}}
+        .tabadd{flex:none;width:30px;height:30px;border-radius:9px;background:var(--ink2);border:1px solid var(--line);color:var(--teal);cursor:pointer;font-size:16px;display:grid;place-items:center}
+        .tabadd:hover{background:var(--ink4)}
+        .badge{flex:none;margin-left:auto;min-width:22px;height:22px;padding:0 6px;border-radius:11px;background:var(--coral);color:#fff;font-family:var(--mono);font-size:11px;font-weight:600;display:none;place-items:center;cursor:pointer}
         .stream{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px;scrollbar-width:thin}
         .stream::-webkit-scrollbar{width:7px}.stream::-webkit-scrollbar-thumb{background:var(--ink3);border-radius:4px}
+        .flow-wrap{display:none;flex-direction:column;gap:10px}
+        .flow-wrap.show{display:flex}
         .empty-stream{margin:auto;color:var(--faint);font-size:13px;text-align:center;max-width:300px;line-height:1.7}
         .blk{animation:rise .35s both}
         @keyframes rise{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}
@@ -64,13 +75,12 @@
         .reply{font-size:14px;line-height:1.65;white-space:pre-wrap}
         .tool{border:1px solid var(--line);border-radius:11px;background:var(--ink2);padding:10px 12px;position:relative;overflow:hidden}
         .tool::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--sky)}
-        .tool.done::before{background:var(--green)} .tool.failed::before{background:var(--coral)}
+        .tool.done::before{background:var(--green)}.tool.failed::before{background:var(--coral)}
         .tool .tt{font-family:var(--mono);font-size:11px;color:var(--dim);display:flex;gap:8px;align-items:center}
         .tool .tt .st{margin-left:auto;font-size:9.5px;letter-spacing:.05em;text-transform:uppercase}
         .tool .tc{font-family:var(--mono);font-size:11px;color:var(--txt);background:var(--ink0);border:1px solid var(--line);border-radius:7px;padding:7px 9px;margin-top:8px;white-space:pre-wrap}
         .tool .to{font-family:var(--mono);font-size:10.5px;color:var(--green);margin-top:7px;white-space:pre-wrap}
         .tool.failed .to{color:var(--coral)}
-        /* approval card */
         .perm{border:1px solid rgba(245,165,36,.4);border-radius:13px;background:linear-gradient(180deg,rgba(245,165,36,.06),var(--ink2));padding:13px;position:relative;overflow:hidden;animation:rise .35s both,glow 1.8s ease-in-out infinite}
         @keyframes glow{0%,100%{box-shadow:0 0 0 0 rgba(245,165,36,0)}50%{box-shadow:0 0 0 3px rgba(245,165,36,.12)}}
         .perm::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--amber)}
@@ -87,8 +97,21 @@
         .perm .pact .no:hover{background:rgba(255,93,93,.12)}
         .perm.resolved{animation:none;opacity:.55}
         .perm.resolved::before{background:var(--faint)}
+        .perm.flash{outline:2px solid var(--teal);outline-offset:2px}
 
-        /* log column */
+        /* queue overlay */
+        .queue{position:absolute;top:48px;right:12px;width:340px;max-height:70vh;overflow-y:auto;background:var(--ink2);border:1px solid var(--line2);border-radius:14px;box-shadow:0 24px 60px rgba(0,0,0,.55);z-index:80;display:none;flex-direction:column}
+        .queue.show{display:flex}
+        .queue .qh{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);padding:12px 14px;border-bottom:1px solid var(--line)}
+        .queue .qg{padding:8px 14px}
+        .queue .qgt{font-size:11px;font-weight:600;color:var(--teal);margin-bottom:6px}
+        .queue .qi{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:9px;background:var(--ink3);border:1px solid var(--line);margin-bottom:6px;cursor:pointer;font-family:var(--mono);font-size:11px}
+        .queue .qi:hover{border-color:var(--teal-d)}
+        .queue .qi .qd{width:7px;height:7px;border-radius:50%;background:var(--coral);flex:none}
+        .queue .qi .qc{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .queue .qempty{padding:20px 14px;color:var(--faint);font-size:12px;text-align:center}
+
+        /* log */
         .log{flex:1;overflow-y:auto;padding:10px 12px;font-family:var(--mono);font-size:10.5px;line-height:1.6;color:var(--faint);scrollbar-width:thin}
         .log::-webkit-scrollbar{width:6px}.log::-webkit-scrollbar-thumb{background:var(--ink3);border-radius:3px}
         .log .ln{padding:2px 0;border-bottom:1px solid rgba(124,164,160,.05);word-break:break-all}
@@ -102,16 +125,13 @@
 
     <!-- 控制列 -->
     <div class="col">
-        <div class="col-h"><span class="live" id="live"></span> 控制台 · 验证台</div>
+        <div class="col-h"><span class="live" id="live"></span> 控制台 · 多会话</div>
         <div class="ctrl">
             <div class="brand">SENTINEL <b>relay</b></div>
-            <div class="field">
-                <label>当前会话 (C 位)</label>
-                <div class="sidbox empty" id="sid">— 暂无，点「新建会话」或等待默认会话 —</div>
+            <div class="field"><label>当前会话 (C 位)</label>
+                <div class="inp" id="sid" style="min-height:auto;font-family:var(--mono);font-size:11px;color:var(--teal)">— 等待会话 —</div>
             </div>
-            <button class="btn teal" id="newBtn">＋ 新建会话</button>
-            <div class="field">
-                <label>切换 mode（哨兵在不在场）</label>
+            <div class="field"><label>切换 mode（哨兵在不在场）</label>
                 <div class="modes" id="modes">
                     <button class="btn sel" data-mode="default">🛡 手动</button>
                     <button class="btn" data-mode="plan">📋 只读</button>
@@ -119,27 +139,33 @@
                     <button class="btn" data-mode="yolo">🚀 YOLO</button>
                 </div>
             </div>
-            <div class="field">
-                <label>遥控输入（发给 C 位）</label>
+            <div class="field"><label>遥控输入（发给 C 位）</label>
                 <textarea class="inp" id="inp" placeholder="例：运行 echo HELLO 并告诉我输出&#10;或 /status"></textarea>
             </div>
             <div class="row">
                 <button class="btn teal" id="sendBtn">发送 ↑</button>
                 <button class="btn" id="stopBtn">停</button>
             </div>
-            <div class="note">这是开发验证台：连 <code>ws://localhost:7331/ws</code>，把中继桥接过来的 Kimi 流实时渲染出来。批准卡可点。Phase 2 由 Flutter 替换。</div>
+            <div class="note">多会话验证台：顶部标签切换会话，🟠=该会话有待批准，右上角角标点开待批准队列。后台会话照渲染，切回来看得见（切走≠暂停）。</div>
         </div>
     </div>
 
     <!-- 流列 -->
-    <div class="col">
-        <div class="col-h"><span class="live on" style="background:var(--teal);animation:none"></span> 活的流 · C 位会话</div>
+    <div class="col mid">
+        <div class="tabsbar" id="tabsbar">
+            <div class="tabadd" id="tabadd" title="新建会话">＋</div>
+            <div class="badge" id="badge" title="待批准队列">0</div>
+        </div>
         <div class="stream" id="stream">
-            <div class="empty-stream" id="emptyStream">等待会话建立…<br>连上中继后，这里会逐字滚出 agent 的思考、回复、工具调用，<br>以及浮在流里的批准卡。</div>
+            <div class="empty-stream" id="emptyStream">等待会话建立…</div>
+        </div>
+        <div class="queue" id="queue">
+            <div class="qh">待批准队列 · 按会话分组</div>
+            <div id="queueBody"></div>
         </div>
     </div>
 
-    <!-- 协议日志列 -->
+    <!-- 日志列 -->
     <div class="col">
         <div class="col-h"><span class="live" style="background:var(--sky);animation:none"></span> 协议日志 · envelope</div>
         <div class="log" id="log"></div>
@@ -151,179 +177,218 @@
     (function(){
         "use strict";
         var $=function(s){return document.querySelector(s);};
-        var sid=null;            // 当前 C 位 sid
+        function el(t,c){var e=document.createElement(t);if(c)e.className=c;return e;}
+        function esc(s){return String(s).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});}
+
         var ws=null;
-        var streams={};          // sid -> {thought, reply, tools:{id->el}}  渲染句柄
-        var permCards={};        // permissionId(string) -> el
+        var currentSid=null;
+        var sessions={};      // sid -> {title, wrap, thought, reply, tools, pending, mode}
+        var permIndex={};     // pid(string) -> {sid, title, cmdText, options, el}
 
-        function logLine(dir, type, raw){
-            var el=document.createElement('div');
-            el.className='ln '+(dir==='up'?'up':(type==='relay.error'?'err':''));
+        /* ---------- 日志 ---------- */
+        function logLine(dir,type,raw){
+            var e=el('div','ln '+(dir==='up'?'up':(type==='relay.error'?'err':'')));
             var t=new Date().toLocaleTimeString('en-GB');
-            el.innerHTML='<span class="t">'+t+'</span> '+(dir==='up'?'↑':'↓')+' <b style="color:var(--dim)">'+esc(type)+'</b> '+esc(raw&&raw.length>140?raw.slice(0,140)+'…':raw);
-            var L=$('#log'); L.appendChild(el); L.scrollTop=L.scrollHeight;
-        }
-        function esc(s){return String(s).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});}
-
-        function setSid(s){
-            sid=s;
-            var box=$('#sid');
-            if(s){ box.textContent=s; box.classList.remove('empty'); }
-            else { box.textContent='— 暂无 —'; box.classList.add('empty'); }
+            e.innerHTML='<span class="t">'+t+'</span> '+(dir==='up'?'↑':'↓')+' <b style="color:var(--dim)">'+esc(type)+'</b> '+esc(raw&&raw.length>120?raw.slice(0,120)+'…':raw);
+            var L=$('#log');L.appendChild(e);L.scrollTop=L.scrollHeight;
         }
 
-        function ensureStream(s){
-            if(streams[s]) return streams[s];
+        /* ---------- 会话管理 ---------- */
+        function ensureSession(sid,configOptions){
+            if(sessions[sid]){ if(configOptions) applyConfig(sid,configOptions); return sessions[sid]; }
             $('#emptyStream')&&$('#emptyStream').remove();
-            var wrap=document.createElement('div'); wrap.className='flow-wrap'; wrap.dataset.sid=s;
+            var wrap=el('div','flow-wrap'); wrap.dataset.sid=sid;
             $('#stream').appendChild(wrap);
-            streams[s]={wrap:wrap, thought:null, reply:null, tools:{}};
-            return streams[s];
+            sessions[sid]={title:null,wrap:wrap,thought:null,reply:null,tools:{},pending:0,mode:'default'};
+            if(configOptions) applyConfig(sid,configOptions);
+            renderTabs();
+            if(!currentSid) switchTo(sid);
+            return sessions[sid];
         }
-        function activeStream(){ return sid?ensureStream(sid):null; }
+        function switchTo(sid){
+            if(!sessions[sid]) return;
+            currentSid=sid;
+            for(var s in sessions){ sessions[s].wrap.classList.toggle('show', s===sid); }
+            $('#sid').textContent=sid;
+            updateModeButtons(sessions[sid].mode);
+            renderTabs(); scrollStream();
+        }
+        function applyConfig(sid,configOptions){
+            (configOptions||[]).forEach(function(c){ if(c.id==='mode'&&sessions[sid]) sessions[sid].mode=c.currentValue; });
+            if(sid===currentSid) updateModeButtons(sessions[sid].mode);
+        }
+        function updateModeButtons(v){
+            document.querySelectorAll('#modes .btn').forEach(function(b){ b.classList.toggle('sel', b.getAttribute('data-mode')===v); });
+        }
+        function renderTabs(){
+            var bar=$('#tabsbar');
+            // 保留 tabadd 和 badge，移除旧 tab
+            Array.prototype.slice.call(bar.querySelectorAll('.tab')).forEach(function(t){t.remove();});
+            var addBtn=$('#tabadd');
+            var total=0;
+            Object.keys(sessions).forEach(function(sid){
+                var s=sessions[sid]; total+=s.pending;
+                var tab=el('div','tab'+(sid===currentSid?' active':''));
+                tab.innerHTML='<span class="td'+(s.pending>0?' wait':'')+'"></span>'+esc(s.title||('sid·'+sid.slice(-5)));
+                tab.onclick=function(){switchTo(sid);};
+                bar.insertBefore(tab,addBtn);
+            });
+            var badge=$('#badge');
+            badge.textContent=total; badge.style.display=total>0?'grid':'none';
+            renderQueue();
+        }
 
+        /* ---------- 流渲染（按 sid 分流，防串味） ---------- */
+        function scrollStream(){ var s=$('#stream'); s.scrollTop=s.scrollHeight; }
         function addThought(st){
-            var d=document.createElement('div'); d.className='blk thought';
+            var d=el('div','blk thought');
             d.innerHTML='<div class="th"><span class="ti">▸</span> 思考中…</div><div class="tb"><div><p></p></div></div>';
             d.querySelector('.th').onclick=function(){d.classList.toggle('open');};
-            st.wrap.appendChild(d); st.thought=d; st.reply=null;
+            st.wrap.appendChild(d); st.thought=d; st.reply=null; scrollStream();
+        }
+        function addReply(st){ var d=el('div','blk reply'); st.wrap.appendChild(d); st.reply=d; st.thought=null; scrollStream(); }
+        function appendText(st,kind,text){
+            if(kind==='thought'){ if(!st.thought)addThought(st); st.thought.querySelector('p').textContent+=text; }
+            else{ if(!st.reply)addReply(st); st.reply.textContent+=text; }
             scrollStream();
         }
-        function addReply(st){
-            var d=document.createElement('div'); d.className='blk reply';
-            st.wrap.appendChild(d); st.reply=d; st.thought=null;
-            scrollStream();
-        }
-        function appendText(st, kind, text){
-            if(kind==='thought'){
-                if(!st.thought) addThought(st);
-                st.thought.querySelector('p').textContent+=text;
-            } else {
-                if(!st.reply) addReply(st);
-                st.reply.textContent+=text;
-            }
-            scrollStream();
-        }
-        function addTool(st, id, title){
-            var d=document.createElement('div'); d.className='blk tool'; d.dataset.id=id;
+        function addTool(st,id,title){
+            var d=el('div','blk tool'); d.dataset.id=id;
             d.innerHTML='<div class="tt">▣ '+esc(title||'tool')+'<span class="st">pending</span></div>';
             st.wrap.appendChild(d); st.tools[id]=d; scrollStream();
         }
-        function updateTool(st, id, status, contentText, rawOutput){
-            var d=st.tools[id]; if(!d) return;
+        function updateTool(st,id,status,txt,rawOutput){
+            var d=st.tools[id]; if(!d)return;
             d.classList.remove('done','failed');
-            if(status==='completed') d.classList.add('done');
-            if(status==='failed') d.classList.add('failed');
-            var stEl=d.querySelector('.st'); if(stEl) stEl.textContent=status||'';
-            if(contentText && !d.querySelector('.tc')){
-                var c=document.createElement('div'); c.className='tc'; d.appendChild(c);
-            }
-            if(contentText){ var c=d.querySelector('.tc'); if(c) c.textContent=contentText; }
+            if(status==='completed')d.classList.add('done');
+            if(status==='failed')d.classList.add('failed');
+            var stEl=d.querySelector('.st'); if(stEl)stEl.textContent=status||'';
+            if(txt){ if(!d.querySelector('.tc')){var c=el('div','tc');d.appendChild(c);} d.querySelector('.tc').textContent=txt; }
             if(status==='completed'||status==='failed'){
-                var o=document.createElement('div'); o.className='to';
-                o.textContent=(status==='failed'?'✗ ':'✓ ')+(rawOutput||''); d.appendChild(o);
+                if(!d.querySelector('.to')){var o=el('div','to');o.textContent=(status==='failed'?'✗ ':'✓ ')+(rawOutput||'');d.appendChild(o);}
             }
             scrollStream();
         }
-        function scrollStream(){ var s=$('#stream'); s.scrollTop=s.scrollHeight; }
-
-        function addPerm(env){
-            var pl=env.payload, pid=String(env.permissionIdRaw);
-            var d=document.createElement('div'); d.className='blk perm'; d.dataset.pid=pid;
-            var opts=pl.options||[];
-            var title=(pl.toolCall&&pl.toolCall.title)||'tool';
-            var cmdText='';
-            try{ // 尝试从 toolCall.content 拼出命令文本
-                (pl.toolCall&&pl.toolCall.content||[]).forEach(function(c){
-                    if(c.content&&c.content.text) cmdText+=c.content.text;
-                });
-            }catch(e){}
-            var btns='';
-            opts.forEach(function(o){
-                var cls = o.kind==='reject_once'?'btn no':(o.kind==='allow_always'?'btn':'btn ok');
-                var label = o.kind==='reject_once'?'拒绝':(o.kind==='allow_always'?'本会话都批准':'批准');
-                btns+='<button class="'+cls+'" data-opt="'+esc(o.optionId)+'">'+label+'</button>';
-            });
-            d.innerHTML='<div class="ph"><div class="pi">▣</div><div class="pt">'+esc(title)+'</div><div class="pw">等你拍板</div></div>'+
-                (cmdText?'<div class="pcmd">'+esc(cmdText)+'</div>':'')+
-                '<div class="pact">'+btns+'</div>';
-            d.querySelectorAll('[data-opt]').forEach(function(b){
-                b.onclick=function(){
-                    send('permission.decision', env.sessionId, {permissionId:env.permissionIdRaw, optionId:b.getAttribute('data-opt')});
-                    d.classList.add('resolved');
-                    d.querySelector('.pw').textContent='已回应';
-                    d.querySelectorAll('button').forEach(function(x){x.disabled=true;x.style.opacity=.5;});
-                };
-            });
-            $('#stream').appendChild(d); permCards[pid]=d; scrollStream();
-        }
-
-        function send(type, sessionId, payload){
-            if(!ws||ws.readyState!==1) return;
-            var env={type:type}; if(sessionId) env.sessionId=sessionId; if(payload) env.payload=payload;
-            ws.send(JSON.stringify(env));
-            logLine('up', type, JSON.stringify(payload||{}));
-        }
-
-        function handle(env){
-            logLine('down', env.type, env.payload?JSON.stringify(env.payload):'');
-            switch(env.type){
-                case 'session.created':
-                    if(!sid) setSid(env.sessionId);
-                    ensureStream(env.sessionId);
-                    // 更新 mode 选中态
-                    try{
-                        var co=env.payload.configOptions||[];
-                        co.forEach(function(c){ if(c.id==='mode') highlightMode(c.currentValue); });
-                    }catch(e){}
-                    break;
-                case 'session.update':
-                    renderUpdate(env.sessionId, env.payload);
-                    break;
-                case 'permission.request':
-                    env.permissionIdRaw=env.payload.permissionId; // 保留原始类型
-                    addPerm(env);
-                    break;
-                case 'relay.error':
-                    var e=document.createElement('div'); e.className='blk reply'; e.style.color='var(--coral)';
-                    e.textContent='⚠ '+((env.payload&&env.payload.message)||'error'); $('#stream').appendChild(e); scrollStream();
-                    break;
-            }
-        }
-
-        function renderUpdate(s, update){
-            var st=ensureStream(s);
+        function renderUpdate(sid,update){
+            var st=ensureSession(sid);
             switch(update.sessionUpdate){
                 case 'agent_thought_chunk': appendText(st,'thought',update.content&&update.content.text||''); break;
                 case 'agent_message_chunk': appendText(st,'reply',update.content&&update.content.text||''); break;
-                case 'tool_call': addTool(st, update.toolCallId, update.title); break;
+                case 'tool_call': addTool(st,update.toolCallId,update.title); break;
                 case 'tool_call_update':
                     var txt=''; try{(update.content||[]).forEach(function(c){if(c.content&&c.content.text)txt+=c.content.text;});}catch(e){}
-                    updateTool(st, update.toolCallId, update.status, txt, update.rawOutput);
-                    break;
-                case 'config_option_update':
-                    (update.configOptions||[]).forEach(function(c){ if(c.id==='mode') highlightMode(c.currentValue); });
-                    break;
+                    updateTool(st,update.toolCallId,update.status,txt,update.rawOutput); break;
+                case 'config_option_update': applyConfig(sid,update.configOptions); break;
             }
         }
-        function highlightMode(v){
-            document.querySelectorAll('#modes .btn').forEach(function(b){ b.classList.toggle('sel', b.getAttribute('data-mode')===v); });
+
+        /* ---------- 批准卡 + 待批准队列 ---------- */
+        function cmdTextOf(toolCall){
+            var t=''; try{(toolCall&&toolCall.content||[]).forEach(function(c){if(c.content&&c.content.text)t+=c.content.text;});}catch(e){}
+            return t;
+        }
+        function addPerm(env){
+            var sid=env.sessionId, pl=env.payload, pid=String(pl.permissionId);
+            var st=ensureSession(sid);
+            st.pending++;
+            var d=el('div','blk perm'); d.dataset.pid=pid;
+            var title=(pl.toolCall&&pl.toolCall.title)||'tool';
+            var cmd=cmdTextOf(pl.toolCall);
+            var opts=pl.options||[];
+            var btns='';
+            opts.forEach(function(o){
+                var cls=o.kind==='reject_once'?'btn no':(o.kind==='allow_always'?'btn':'btn ok');
+                var label=o.kind==='reject_once'?'拒绝':(o.kind==='allow_always'?'本会话都批准':'批准');
+                btns+='<button class="'+cls+'" data-opt="'+esc(o.optionId)+'">'+label+'</button>';
+            });
+            d.innerHTML='<div class="ph"><div class="pi">▣</div><div class="pt">'+esc(title)+'</div><div class="pw">等你拍板</div></div>'+
+                (cmd?'<div class="pcmd">'+esc(cmd)+'</div>':'')+'<div class="pact">'+btns+'</div>';
+            d.querySelectorAll('[data-opt]').forEach(function(b){
+                b.onclick=function(){
+                    send('permission.decision',sid,{permissionId:pl.permissionId,optionId:b.getAttribute('data-opt')});
+                    resolvePerm(pid);
+                };
+            });
+            st.wrap.appendChild(d);
+            permIndex[pid]={sid:sid,title:title,cmdText:cmd,options:opts,el:d};
+            renderTabs(); scrollStream();
+        }
+        function resolvePerm(pid){
+            var p=permIndex[pid]; if(!p)return;
+            if(sessions[p.sid]){ sessions[p.sid].pending=Math.max(0,sessions[p.sid].pending-1); }
+            p.el.classList.add('resolved');
+            var pw=p.el.querySelector('.pw'); if(pw)pw.textContent='已回应';
+            p.el.querySelectorAll('button').forEach(function(x){x.disabled=true;x.style.opacity=.5;});
+            delete permIndex[pid];
+            renderTabs();
+        }
+        function renderQueue(){
+            var body=$('#queueBody'); body.innerHTML='';
+            var pids=Object.keys(permIndex);
+            if(pids.length===0){ body.innerHTML='<div class="qempty">没有待批准的请求</div>'; return; }
+            // 按 sid 分组
+            var groups={};
+            pids.forEach(function(pid){ var p=permIndex[pid]; (groups[p.sid]=groups[p.sid]||[]).push(p); });
+            Object.keys(groups).forEach(function(sid){
+                var g=el('div','qg');
+                g.innerHTML='<div class="qgt">'+esc((sessions[sid]&&sessions[sid].title)||('sid·'+sid.slice(-5)))+'</div>';
+                groups[sid].forEach(function(p){
+                    var qi=el('div','qi');
+                    qi.innerHTML='<span class="qd"></span><span class="qc">'+esc(p.cmdText||p.title)+'</span>';
+                    qi.onclick=function(){
+                        switchTo(sid);
+                        $('#queue').classList.remove('show');
+                        p.el.scrollIntoView({behavior:'smooth',block:'center'});
+                        p.el.classList.add('flash'); setTimeout(function(){p.el.classList.remove('flash');},1400);
+                    };
+                    g.appendChild(qi);
+                });
+                body.appendChild(g);
+            });
         }
 
+        /* ---------- 收发 ---------- */
+        function send(type,sessionId,payload){
+            if(!ws||ws.readyState!==1)return;
+            var env={type:type}; if(sessionId)env.sessionId=sessionId; if(payload)env.payload=payload;
+            ws.send(JSON.stringify(env));
+            logLine('up',type,JSON.stringify(payload||{}));
+        }
+        function handle(env){
+            logLine('down',env.type,env.payload?JSON.stringify(env.payload):'');
+            switch(env.type){
+                case 'session.created': ensureSession(env.sessionId,env.payload&&env.payload.configOptions); break;
+                case 'session.update': renderUpdate(env.sessionId,env.payload); break;
+                case 'permission.request': addPerm(env); break;
+                case 'relay.error':
+                    var e=el('div','blk reply'); e.style.color='var(--coral)';
+                    e.textContent='⚠ '+((env.payload&&env.payload.message)||'error');
+                    if(currentSid&&sessions[currentSid])sessions[currentSid].wrap.appendChild(e); else $('#stream').appendChild(e);
+                    scrollStream(); break;
+            }
+        }
         function connect(){
             ws=new WebSocket('ws://'+location.hostname+':7331/ws');
-            ws.onopen=function(){ $('#live').classList.add('on'); };
-            ws.onclose=function(){ $('#live').classList.remove('on'); setTimeout(connect,1500); };
-            ws.onmessage=function(ev){ try{ handle(JSON.parse(ev.data)); }catch(e){} };
+            ws.onopen=function(){$('#live').classList.add('on');};
+            ws.onclose=function(){$('#live').classList.remove('on');setTimeout(connect,1500);};
+            ws.onmessage=function(ev){try{handle(JSON.parse(ev.data));}catch(e){}};
         }
 
-// 控件事件
-        $('#newBtn').onclick=function(){ send('new_session', null, {}); };
-        $('#sendBtn').onclick=function(){ var t=$('#inp').value.trim(); if(!t||!sid) return; send('prompt', sid, {text:t}); $('#inp').value=''; };
-        $('#stopBtn').onclick=function(){ if(sid) send('cancel', sid, {}); };
-        $('#inp').addEventListener('keydown',function(e){ if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){ $('#sendBtn').click(); } });
+        /* ---------- 控件 ---------- */
+        $('#tabadd').onclick=function(){send('new_session',null,{});};
+        $('#sendBtn').onclick=function(){
+            var t=$('#inp').value.trim(); if(!t||!currentSid)return;
+            if(sessions[currentSid]&&!sessions[currentSid].title){ sessions[currentSid].title=t.slice(0,14); renderTabs(); }
+            send('prompt',currentSid,{text:t}); $('#inp').value='';
+        };
+        $('#stopBtn').onclick=function(){ if(currentSid)send('cancel',currentSid,{}); };
+        $('#inp').addEventListener('keydown',function(e){ if((e.metaKey||e.ctrlKey)&&e.key==='Enter')$('#sendBtn').click(); });
         document.querySelectorAll('#modes .btn').forEach(function(b){
-            b.onclick=function(){ if(sid) send('set_mode', sid, {modeId:b.getAttribute('data-mode')}); };
+            b.onclick=function(){ if(currentSid)send('set_mode',currentSid,{modeId:b.getAttribute('data-mode')}); };
+        });
+        $('#badge').onclick=function(e){ e.stopPropagation(); $('#queue').classList.toggle('show'); };
+        document.addEventListener('click',function(e){
+            if(!e.target.closest('#queue')&&!e.target.closest('#badge')) $('#queue').classList.remove('show');
         });
 
         connect();
