@@ -150,6 +150,7 @@ agent 不该在需要你时傻等，也不该擅自做危险决定。三类时�
 | session/set_mode 用 modeId（非 mode）；set_config_option 用 configId+value | setmode 探针：modeId 报错→改后 OK，config_option_update 回推 | 会话头切 mode/model 的精确参数 |
 | slash 命令 = session/prompt 发 `/xxx` 文本，输出走 message_chunk | slash 探针：/status 返回结构化状态 | 中继无需为 slash 特殊处理 |
 | session/resume 需 {sessionId, cwd}；恢复上下文但不重放历史 update | resume 探针 | 中继须自缓存流尾部补发；重试拉起用 resume 恢复上下文 |
+| wire.jsonl（sessions/\<workDirKey\>/\<sid\>/agents/main/wire.jsonl）是官方文档化的回放数据源；事件类型 turn.prompt（用户）/content.part（think/text）/tool.call/tool.result（按 toolCallId 配对）；session_index.jsonl 提供 sid→sessionDir 映射 | 官方文档明示 wire.jsonl 用于"会话恢复和回放" | 中继 open_history 读 wire.jsonl 解析内容块，用 session_index.jsonl 定位路径 |
 
 ---
 
@@ -337,6 +338,12 @@ S0→S1 之间用户**不能**提前批准——Kimi 还没发 permission，提�
 | 落卡（先切 sid 再滚卡）     | 落到错误的流             |
 | 流里的批准卡                | 在 A 的流里批了 B 的命令 |
 | 遥控输入框（发给 C 位 sid） | 想指挥 A 结果发给了 B    |
+
+### 历史回放：打开历史会话继续对话
+
+> 读 Kimi 本地存储属官方认可用途（文档明示 wire.jsonl 用于"会话恢复和回放"），非越界。
+
+中继 `open_history` 对历史会话：resume 恢复上下文 + 读 wire.jsonl 解析为内容块，广播 `session.history`，端渲染只读历史流（用户/思考/回复/工具卡）后可继续对话。路径用 `session_index.jsonl` 定位（非自算 workDirKey）。
 
 ## §12 在线 · 诚实 · 连续
 

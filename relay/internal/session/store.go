@@ -1,4 +1,4 @@
-// Package session 持有每会话的配置快照、cwd、流尾部环形缓冲。
+// Package session 持有每会话的配置快照、cwd、流尾部环形缓冲，以及历史会话元信息缓存。
 package session
 
 import (
@@ -6,7 +6,15 @@ import (
 	"sync"
 )
 
-const tailCap = 200 // 每会话缓存最近 N 条 update，供重连/恢复补发
+const tailCap = 200
+
+// SessionMeta 是 session/list 返回的一条历史会话元信息。
+type SessionMeta struct {
+	SessionID string `json:"sessionId"`
+	CWD       string `json:"cwd"`
+	Title     string `json:"title"`
+	UpdatedAt string `json:"updatedAt"`
+}
 
 type sessState struct {
 	config json.RawMessage
@@ -15,8 +23,9 @@ type sessState struct {
 }
 
 type Store struct {
-	mu sync.RWMutex
-	m  map[string]*sessState
+	mu      sync.RWMutex
+	m       map[string]*sessState
+	history []SessionMeta
 }
 
 func New() *Store { return &Store{m: map[string]*sessState{}} }
@@ -42,7 +51,6 @@ func (s *Store) SetCWD(sid, cwd string) {
 	s.ensureLocked(sid).cwd = cwd
 }
 
-// AppendUpdate 追加一条 update 到环形缓冲（onUpdate 热路径，持写锁，开发期可接受）。
 func (s *Store) AppendUpdate(sid string, update json.RawMessage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -62,7 +70,6 @@ func (s *Store) CWD(sid string) string {
 	return ""
 }
 
-// Tail 返回 sid 的流尾部副本。
 func (s *Store) Tail(sid string) []json.RawMessage {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -85,7 +92,6 @@ func (s *Store) SIDs() []string {
 	return out
 }
 
-// Snapshot 返回 sid->config 副本，供新连接补发 created。
 func (s *Store) Snapshot() map[string]json.RawMessage {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -93,5 +99,21 @@ func (s *Store) Snapshot() map[string]json.RawMessage {
 	for k, v := range s.m {
 		out[k] = v.config
 	}
+	return out
+}
+
+// SetHistory 缓存 session/list 的结果（覆盖式）。
+func (s *Store) SetHistory(h []SessionMeta) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.history = h
+}
+
+// History 返回历史元信息副本。
+func (s *Store) History() []SessionMeta {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]SessionMeta, len(s.history))
+	copy(out, s.history)
 	return out
 }
