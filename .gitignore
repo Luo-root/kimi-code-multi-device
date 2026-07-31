@@ -1,0 +1,35 @@
+# ---- Go ----
+relay/relay
+relay/cmd/relay/relay
+*.exe
+*.test
+*.out
+
+# ---- Flutter / Dart（app/ 内 flutter create 会自带更全的，这里兜底）----
+app/.dart_tool/
+app/build/
+app/.flutter-plugins
+app/.flutter-plugins-dependencies
+app/ios/Pods/
+app/.pub-cache/
+
+# ---- IDE ----
+.idea/
+.vscode/
+*.iml
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
+
+# ---- 敏感：绝不让凭证/配置进仓库 ----
+*.key
+*.pem
+*.p8
+*.p12
+secrets/
+config.local.toml
+mcp.local.json
+
+# ---- 探针临时产物 ----
+probe/*.log
