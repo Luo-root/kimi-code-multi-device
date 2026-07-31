@@ -32,7 +32,6 @@ func New() *Relay {
 	return &Relay{store: session.New(), clients: map[*client]bool{}}
 }
 
-// Start 初始化 ACP（带 OnExit）并建默认会话。
 func (r *Relay) Start() error {
 	if os.Getenv("KIMI_CODE_HOME") == "" {
 		log.Println("[relay] 警告：未设置 KIMI_CODE_HOME，可能 Authentication required")
@@ -59,6 +58,10 @@ func (r *Relay) Start() error {
 	cwd, _ := os.Getwd()
 	if _, err := r.newSession(ctx, cwd); err != nil {
 		return err
+	}
+	// 启动时拉一次历史列表缓存（此时无 client，broadcast 空跑，靠 snapshot 补发）
+	if err := r.refreshHistory(ctx); err != nil {
+		log.Printf("[relay] 启动拉取历史列表失败: %v", err)
 	}
 	return nil
 }
@@ -91,6 +94,65 @@ func (r *Relay) newSession(ctx context.Context, cwd string) (string, error) {
 	return res.SessionID, nil
 }
 
+// refreshHistory 调 session/list（空参=全部）并存缓存。
+func (r *Relay) refreshHistory(ctx context.Context) error {
+	m, err := r.acp.Request(ctx, "session/list", map[string]any{})
+	if err != nil {
+		return err
+	}
+	var res struct {
+		Sessions []session.SessionMeta `json:"sessions"`
+	}
+	_ = json.Unmarshal(m.Result, &res)
+	r.store.SetHistory(res.Sessions)
+	return nil
+}
+
+// listSessions 上行：刷新缓存并广播给所有端。
+func (r *Relay) listSessions() {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := r.refreshHistory(ctx); err != nil {
+		r.sendErr("", "list_sessions: "+err.Error())
+		return
+	}
+	r.broadcast(Env{Type: DownSessionList, Payload: mustJSON(DownSessionListPayload{Sessions: r.store.History()})})
+}
+
+// openHistory 打开一个历史会话：活跃则直接补发，否则 resume 恢复上下文。
+func (r *Relay) openHistory(sid, cwd string) {
+	// 活跃（中继已有流尾部）：直接补发 created，前端切过去看流
+	if len(r.store.Tail(sid)) > 0 {
+		r.broadcast(Env{
+			Type:      DownSessionCreated,
+			SessionID: sid,
+			Payload:   mustJSON(DownSessionCreatedPayload{ConfigOptions: r.store.Snapshot()[sid]}),
+		})
+		return
+	}
+	// 历史：resume 恢复 Kimi 侧上下文（旧消息不重放，前端显示诚实卡）
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	m, err := r.acp.Request(ctx, "session/resume", map[string]any{"sessionId": sid, "cwd": cwd})
+	if err != nil {
+		r.sendErr(sid, "恢复历史会话失败: "+err.Error())
+		return
+	}
+	var res struct {
+		ConfigOptions json.RawMessage `json:"configOptions"`
+	}
+	_ = json.Unmarshal(m.Result, &res)
+	r.store.SetCWD(sid, cwd)
+	if len(res.ConfigOptions) > 0 {
+		r.store.SetConfig(sid, res.ConfigOptions)
+	}
+	r.broadcast(Env{
+		Type:      DownSessionCreated,
+		SessionID: sid,
+		Payload:   mustJSON(DownSessionCreatedPayload{ConfigOptions: res.ConfigOptions, Resumed: true}),
+	})
+}
+
 func (r *Relay) onUpdate(sid string, update json.RawMessage) {
 	var probe struct {
 		SessionUpdate string          `json:"sessionUpdate"`
@@ -100,7 +162,7 @@ func (r *Relay) onUpdate(sid string, update json.RawMessage) {
 	if probe.SessionUpdate == "config_option_update" && len(probe.ConfigOptions) > 0 {
 		r.store.SetConfig(sid, probe.ConfigOptions)
 	}
-	r.store.AppendUpdate(sid, update) // 进环形缓冲，供重连/恢复补发
+	r.store.AppendUpdate(sid, update)
 	r.broadcast(Env{Type: DownSessionUpdate, SessionID: sid, Payload: update})
 }
 
@@ -119,14 +181,12 @@ func (r *Relay) onPermission(sid string, id json.RawMessage, params json.RawMess
 	})
 }
 
-// onKimiExit kimi 非预期退出：广播 degraded + 作废所有待批准。
 func (r *Relay) onKimiExit() {
 	log.Println("[relay] kimi 子进程退出（非预期）→ degraded")
 	r.broadcast(Env{Type: DownPermInvalidate})
 	r.broadcast(Env{Type: DownRelayState, Payload: mustJSON(DownRelayStatePayload{State: "degraded"})})
 }
 
-// restartKimi 重新拉起 kimi：Restart + initialize + 逐 sid resume 恢复上下文。
 func (r *Relay) restartKimi() {
 	log.Println("[relay] 重试拉起 kimi …")
 	if err := r.acp.Restart(); err != nil {
@@ -143,7 +203,6 @@ func (r *Relay) restartKimi() {
 		r.sendErr("", "restart initialize: "+err.Error())
 		return
 	}
-	// 逐 sid resume（带 cwd），恢复 Kimi 侧上下文
 	for _, sid := range r.store.SIDs() {
 		cwd := r.store.CWD(sid)
 		m, err := r.acp.Request(ctx, "session/resume", map[string]any{"sessionId": sid, "cwd": cwd})
@@ -180,7 +239,6 @@ func (r *Relay) broadcast(e Env) {
 	}
 }
 
-// sendBlocking 阻塞写，供 snapshot 用（历史不丢帧）。
 func (r *Relay) sendBlocking(c *client, e Env) {
 	b, _ := json.Marshal(e)
 	c.send <- b
@@ -237,7 +295,7 @@ func (r *Relay) readPump(c *client) {
 	}
 }
 
-// snapshot 补发当前所有会话：created（含 config）+ 流尾部（历史）。阻塞写不丢帧。
+// snapshot 补发：活跃会话(created+流尾部) + 历史列表。阻塞写不丢帧。
 func (r *Relay) snapshot(c *client) {
 	for _, sid := range r.store.SIDs() {
 		opts := r.store.Snapshot()[sid]
@@ -250,9 +308,11 @@ func (r *Relay) snapshot(c *client) {
 			r.sendBlocking(c, Env{Type: DownSessionUpdate, SessionID: sid, Payload: u})
 		}
 	}
+	if h := r.store.History(); len(h) > 0 {
+		r.sendBlocking(c, Env{Type: DownSessionList, Payload: mustJSON(DownSessionListPayload{Sessions: h})})
+	}
 }
 
-// handleUp 分发上行。并发关键：会阻塞等 Kimi 的一律丢 goroutine。
 func (r *Relay) handleUp(c *client, data []byte) {
 	var e Env
 	if err := json.Unmarshal(data, &e); err != nil {
@@ -325,7 +385,13 @@ func (r *Relay) handleUp(c *client, data []byte) {
 	case UpRestartKimi:
 		go r.restartKimi()
 	case UpDebugKill:
-		r.acp.DebugKill() // 仅开发期：模拟崩溃
+		r.acp.DebugKill()
+	case UpListSessions:
+		go r.listSessions()
+	case UpOpenHistory:
+		var o UpOpenHistoryPayload
+		_ = json.Unmarshal(e.Payload, &o)
+		go r.openHistory(o.SessionID, o.CWD)
 	}
 }
 

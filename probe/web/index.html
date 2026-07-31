@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SENTINEL · relay 验证台 · 三态/恢复</title>
+    <title>SENTINEL · relay 验证台 · 历史会话</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
@@ -39,12 +39,11 @@
         .inp{width:100%;background:var(--ink2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;color:var(--txt);font-family:var(--body);font-size:13px;resize:vertical;min-height:60px}
         .inp:focus{outline:none;border-color:var(--teal-d)}
         .note{font-size:11px;color:var(--faint);line-height:1.5}
-        /* 状态横幅 */
         .banner{display:none;align-items:center;gap:9px;padding:10px 12px;border-radius:11px;background:rgba(245,165,36,.1);border:1px solid rgba(245,165,36,.35);font-size:12px;color:var(--amber)}
         .banner.show{display:flex}
         .banner .bi{font-size:15px}
         .banner .bbtn{margin-left:auto;font-family:var(--body);font-weight:600;font-size:11px;background:var(--amber);color:#241600;border:none;padding:6px 11px;border-radius:8px;cursor:pointer}
-        .mid{display:flex;flex-direction:column;min-height:0}
+        .mid{display:flex;flex-direction:column;min-height:0;position:relative}
         .tabsbar{display:flex;gap:6px;align-items:center;padding:9px 12px;border-bottom:1px solid var(--line);overflow-x:auto;scrollbar-width:none}
         .tabsbar::-webkit-scrollbar{display:none}
         .tab{flex:none;display:flex;align-items:center;gap:7px;padding:6px 11px;border-radius:9px;background:var(--ink2);border:1px solid var(--line);cursor:pointer;font-size:12px;color:var(--dim);white-space:nowrap;transition:.15s}
@@ -53,9 +52,12 @@
         .tab .td{width:7px;height:7px;border-radius:50%;background:var(--green);flex:none}
         .tab .td.wait{background:var(--coral);animation:p2 1.6s infinite}
         @keyframes p2{0%{box-shadow:0 0 0 0 rgba(255,93,93,.5)}70%{box-shadow:0 0 0 6px rgba(255,93,93,0)}100%{box-shadow:0 0 0 0 rgba(255,93,93,0)}}
-        .tabadd{flex:none;width:30px;height:30px;border-radius:9px;background:var(--ink2);border:1px solid var(--line);color:var(--teal);cursor:pointer;font-size:16px;display:grid;place-items:center}
+        .tabadd{flex:none;width:30px;height:30px;border-radius:9px;background:var(--ink2);border:1px solid var(--line);color:var(--teal);cursor:pointer;font-size:16px;display:grid;place-items:center;transition:.15s}
         .tabadd:hover{background:var(--ink4)}
-        .badge{flex:none;margin-left:auto;min-width:22px;height:22px;padding:0 6px;border-radius:11px;background:var(--coral);color:#fff;font-family:var(--mono);font-size:11px;font-weight:600;display:none;place-items:center;cursor:pointer}
+        .histbtn{flex:none;margin-left:auto;height:30px;padding:0 11px;border-radius:9px;background:var(--ink2);border:1px solid var(--line);color:var(--dim);cursor:pointer;font-size:12px;display:flex;align-items:center;gap:6px;transition:.15s}
+        .histbtn:hover{color:var(--txt);border-color:var(--teal-d)}
+        .histbtn.on{color:var(--teal);border-color:rgba(45,212,191,.4);background:rgba(45,212,191,.08)}
+        .badge{flex:none;margin-left:8px;min-width:22px;height:22px;padding:0 6px;border-radius:11px;background:var(--coral);color:#fff;font-family:var(--mono);font-size:11px;font-weight:600;display:none;place-items:center;cursor:pointer}
         .stream{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px;scrollbar-width:thin}
         .stream::-webkit-scrollbar{width:7px}.stream::-webkit-scrollbar-thumb{background:var(--ink3);border-radius:4px}
         .flow-wrap{display:none;flex-direction:column;gap:10px}
@@ -80,6 +82,10 @@
         .tool .tc{font-family:var(--mono);font-size:11px;color:var(--txt);background:var(--ink0);border:1px solid var(--line);border-radius:7px;padding:7px 9px;margin-top:8px;white-space:pre-wrap}
         .tool .to{font-family:var(--mono);font-size:10.5px;color:var(--green);margin-top:7px;white-space:pre-wrap}
         .tool.failed .to{color:var(--coral)}
+        /* 诚实卡 */
+        .syscard{border:1px solid rgba(245,165,36,.3);border-left:3px solid var(--amber);border-radius:11px;background:rgba(245,165,36,.06);padding:11px 13px;font-size:12px;color:var(--amber);line-height:1.55;display:flex;gap:9px;align-items:flex-start}
+        .syscard .si{font-size:15px;flex:none;line-height:1.2}
+        .syscard .st2{color:var(--dim)}
         .perm{border:1px solid rgba(245,165,36,.4);border-radius:13px;background:linear-gradient(180deg,rgba(245,165,36,.06),var(--ink2));padding:13px;position:relative;overflow:hidden;animation:rise .35s both,glow 1.8s ease-in-out infinite}
         @keyframes glow{0%,100%{box-shadow:0 0 0 0 rgba(245,165,36,0)}50%{box-shadow:0 0 0 3px rgba(245,165,36,.12)}}
         .perm::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--amber)}
@@ -95,7 +101,30 @@
         .perm.resolved{animation:none;opacity:.55}.perm.resolved::before{background:var(--faint)}
         .perm.invalid{animation:none;opacity:.5;border-color:var(--line)}.perm.invalid::before{background:var(--faint)}
         .perm.flash{outline:2px solid var(--teal);outline-offset:2px}
-        .queue{position:absolute;top:48px;right:12px;width:340px;max-height:70vh;overflow-y:auto;background:var(--ink2);border:1px solid var(--line);border-radius:14px;box-shadow:0 24px 60px rgba(0,0,0,.55);z-index:80;display:none;flex-direction:column}
+        /* 历史抽屉 */
+        .hist{position:absolute;top:50px;left:10px;right:10px;bottom:10px;background:var(--ink2);border:1px solid var(--line);border-radius:16px;box-shadow:0 30px 70px rgba(0,0,0,.6);z-index:70;display:none;flex-direction:column;overflow:hidden;animation:rise .25s both}
+        .hist.show{display:flex}
+        .hist .hh{display:flex;align-items:center;gap:9px;padding:14px 16px;border-bottom:1px solid var(--line)}
+        .hist .hh .ht{font-family:var(--disp);font-weight:600;font-size:14px}
+        .hist .hh .hc{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--faint)}
+        .hist .hh .hx{width:28px;height:28px;border-radius:8px;background:var(--ink3);border:1px solid var(--line);color:var(--dim);cursor:pointer;display:grid;place-items:center;font-size:14px}
+        .hist .hh .hx:hover{color:var(--txt)}
+        .hist .hb{flex:1;overflow-y:auto;padding:10px;scrollbar-width:thin}
+        .hist .hb::-webkit-scrollbar{width:7px}.hist .hb::-webkit-scrollbar-thumb{background:var(--ink3);border-radius:4px}
+        .hitem{display:flex;align-items:center;gap:11px;padding:11px 12px;border-radius:12px;background:var(--ink3);border:1px solid var(--line);margin-bottom:8px;cursor:pointer;transition:.15s}
+        .hitem:hover{border-color:var(--teal-d);transform:translateX(2px);background:var(--ink4)}
+        .hitem .hd{width:9px;height:9px;border-radius:50%;flex:none}
+        .hitem .hd.act{background:var(--green);box-shadow:0 0 0 0 rgba(52,211,153,.4);animation:p 2s infinite}
+        .hitem .hd.his{background:var(--faint)}
+        .hitem .hm{flex:1;min-width:0}
+        .hitem .ht2{font-size:13px;font-weight:500;color:var(--txt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .hitem .hs{font-family:var(--mono);font-size:10px;color:var(--faint);margin-top:3px;display:flex;gap:8px}
+        .hitem .hs .cw{color:var(--teal-d)}
+        .hitem .ha{font-family:var(--mono);font-size:9px;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);flex:none;align-self:flex-start;margin-top:2px}
+        .hitem.act .ha{color:var(--green)}
+        .hist .hempty{padding:40px 20px;text-align:center;color:var(--faint);font-size:12.5px;line-height:1.7}
+        /* 待批准队列 */
+        .queue{position:absolute;top:50px;right:12px;width:340px;max-height:70vh;overflow-y:auto;background:var(--ink2);border:1px solid var(--line);border-radius:14px;box-shadow:0 24px 60px rgba(0,0,0,.55);z-index:80;display:none;flex-direction:column}
         .queue.show{display:flex}
         .queue .qh{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);padding:12px 14px;border-bottom:1px solid var(--line)}
         .queue .qg{padding:8px 14px}
@@ -116,7 +145,7 @@
 <body>
 <div class="app">
     <div class="col">
-        <div class="col-h"><span class="live" id="live"></span> 控制台 · 三态/恢复</div>
+        <div class="col-h"><span class="live" id="live"></span> 控制台 · 历史会话</div>
         <div class="ctrl">
             <div class="brand">SENTINEL <b>relay</b></div>
             <div class="banner" id="banner"><span class="bi">⚠</span><span id="bannerTxt">Kimi 离线（🟡）</span><button class="bbtn" id="retryBtn">重试拉起</button></div>
@@ -130,7 +159,7 @@
                     <button class="btn" data-mode="yolo">🚀 YOLO</button>
                 </div></div>
             <div class="field"><label>遥控输入（发给 C 位）</label>
-                <textarea class="inp" id="inp" placeholder="例：记住数字 77&#10;或 /status"></textarea></div>
+                <textarea class="inp" id="inp" placeholder="例：你还记得我们之前聊的吗&#10;或 /status"></textarea></div>
             <div class="row">
                 <button class="btn teal" id="sendBtn">发送 ↑</button>
                 <button class="btn" id="stopBtn">停</button>
@@ -138,16 +167,21 @@
             <div class="row">
                 <button class="btn coral" id="killBtn" title="仅开发期：强杀 kimi 子进程">💀 模拟崩溃</button>
             </div>
-            <div class="note">第三刀验证台：💀 模拟 kimi 崩溃→🟡横幅+批准卡作废→重试拉起→resume 恢复上下文+流尾部补发。重连会清屏重建（环形缓冲补发历史）。</div>
+            <div class="note">历史会话验证台：顶栏📜打开历史抽屉（Kimi 持久化的全部会话，按时间倒序）。🟢=本次活跃可看流；📜=历史，点过去 resume 恢复上下文（旧全文未缓存，显示诚实卡）。</div>
         </div>
     </div>
 
     <div class="col mid">
         <div class="tabsbar" id="tabsbar">
             <div class="tabadd" id="tabadd" title="新建会话">＋</div>
+            <div class="histbtn" id="histbtn" title="历史会话">📜 历史</div>
             <div class="badge" id="badge" title="待批准队列">0</div>
         </div>
         <div class="stream" id="stream"><div class="empty-stream" id="emptyStream">等待会话建立…</div></div>
+        <div class="hist" id="hist">
+            <div class="hh"><span style="font-size:16px">📜</span><span class="ht">历史会话</span><span class="hc" id="histCount"></span><span class="hx" id="histClose">✕</span></div>
+            <div class="hb" id="histBody"></div>
+        </div>
         <div class="queue" id="queue"><div class="qh">待批准队列 · 按会话分组</div><div id="queueBody"></div></div>
     </div>
 
@@ -164,25 +198,36 @@
         function el(t,c){var e=document.createElement(t);if(c)e.className=c;return e;}
         function esc(s){return String(s).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});}
 
-        var ws=null, currentSid=null, sessions={}, permIndex={};
+        var ws=null, currentSid=null, sessions={}, permIndex={}, meta={}, resumedShown={}, histList=[];
 
+        function relTime(iso){
+            if(!iso) return '';
+            var d=new Date(iso), now=Date.now(), diff=(now-d.getTime())/1000;
+            if(diff<60) return '刚刚';
+            if(diff<3600) return Math.floor(diff/60)+' 分钟前';
+            if(diff<86400) return Math.floor(diff/3600)+' 小时前';
+            if(diff<86400*7) return Math.floor(diff/86400)+' 天前';
+            return d.toLocaleDateString('zh-CN',{month:'short',day:'numeric'});
+        }
+        function cwdTail(cwd){
+            if(!cwd) return '';
+            var parts=cwd.split('/').filter(function(p){return p.length>0;});
+            return parts.slice(-2).join('/');
+        }
         function logLine(dir,type,raw){
             var e=el('div','ln '+(dir==='up'?'up':(type==='relay.error'||type==='relay.state'?'err':'')));
             var t=new Date().toLocaleTimeString('en-GB');
             e.innerHTML='<span class="t">'+t+'</span> '+(dir==='up'?'↑':'↓')+' <b style="color:var(--dim)">'+esc(type)+'</b> '+esc(raw&&raw.length>110?raw.slice(0,110)+'…':raw);
             var L=$('#log');L.appendChild(e);L.scrollTop=L.scrollHeight;
         }
-
-        /* 清屏：WS 连上/重连时调用，避免 snapshot 补发尾部造成重复渲染 */
         function clearAll(){
-            sessions={}; permIndex={}; currentSid=null;
+            sessions={}; permIndex={}; meta={}; resumedShown={}; histList=[]; currentSid=null;
             $('#stream').innerHTML='<div class="empty-stream" id="emptyStream">等待会话建立…</div>';
             Array.prototype.slice.call($('#tabsbar').querySelectorAll('.tab')).forEach(function(t){t.remove();});
-            $('#sid').textContent='— 等待会话 —';
-            $('#badge').style.display='none';
-            renderQueue();
+            $('#sid').textContent='— 等待会话 —'; $('#badge').style.display='none';
+            $('#hist').classList.remove('show'); $('#histbtn').classList.remove('on');
+            renderQueue(); renderHist();
         }
-
         function ensureSession(sid,configOptions){
             if(sessions[sid]){ if(configOptions)applyConfig(sid,configOptions); return sessions[sid]; }
             $('#emptyStream')&&$('#emptyStream').remove();
@@ -199,6 +244,7 @@
         }
         function applyConfig(sid,co){ (co||[]).forEach(function(c){if(c.id==='mode'&&sessions[sid])sessions[sid].mode=c.currentValue;}); if(sid===currentSid)updateModeButtons(sessions[sid].mode); }
         function updateModeButtons(v){ document.querySelectorAll('#modes .btn').forEach(function(b){b.classList.toggle('sel',b.getAttribute('data-mode')===v);}); }
+        function tabTitle(sid){ return (sessions[sid]&&sessions[sid].title) || (meta[sid]&&meta[sid].title) || ('sid·'+sid.slice(-5)); }
         function renderTabs(){
             var bar=$('#tabsbar');
             Array.prototype.slice.call(bar.querySelectorAll('.tab')).forEach(function(t){t.remove();});
@@ -206,7 +252,7 @@
             Object.keys(sessions).forEach(function(sid){
                 var s=sessions[sid]; total+=s.pending;
                 var tab=el('div','tab'+(sid===currentSid?' active':''));
-                tab.innerHTML='<span class="td'+(s.pending>0?' wait':'')+'"></span>'+esc(s.title||('sid·'+sid.slice(-5)));
+                tab.innerHTML='<span class="td'+(s.pending>0?' wait':'')+'"></span>'+esc(tabTitle(sid));
                 tab.onclick=function(){switchTo(sid);};
                 bar.insertBefore(tab,addBtn);
             });
@@ -223,8 +269,15 @@
             if(status==='completed')d.classList.add('done'); if(status==='failed')d.classList.add('failed');
             var stEl=d.querySelector('.st'); if(stEl)stEl.textContent=status||'';
             if(txt){ if(!d.querySelector('.tc')){var c=el('div','tc');d.appendChild(c);} d.querySelector('.tc').textContent=txt; }
-            if(status==='completed'||status==='failed'&&!d.querySelector('.to')){ var o=el('div','to'); o.textContent=(status==='failed'?'✗ ':'✓ ')+(rawOutput||''); d.appendChild(o); }
+            if((status==='completed'||status==='failed')&&!d.querySelector('.to')){ var o=el('div','to'); o.textContent=(status==='failed'?'✗ ':'✓ ')+(rawOutput||''); d.appendChild(o); }
             scrollStream();
+        }
+        function insertSysCard(sid){
+            var st=sessions[sid]; if(!st)return;
+            var t=(meta[sid]&&meta[sid].updatedAt)?(' · 上次活跃 '+relTime(meta[sid].updatedAt)):'';
+            var d=el('div','blk syscard');
+            d.innerHTML='<span class="si">📜</span><span><b>历史会话</b> · agent 已恢复上下文，可直接继续对话。<span class="st2">旧对话的逐字内容未在中继缓存（Kimi 不重放历史），故此处不回看全文。'+esc(t)+'</span></span>';
+            st.wrap.insertBefore(d, st.wrap.firstChild);
         }
         function renderUpdate(sid,update){
             var st=ensureSession(sid);
@@ -261,7 +314,6 @@
             p.el.querySelectorAll('button').forEach(function(x){x.disabled=true;x.style.opacity=.5;});
             delete permIndex[pid]; renderTabs();
         }
-        /* kimi 崩溃：所有未决批准卡作废 */
         function invalidateAll(){
             Object.keys(permIndex).forEach(function(pid){
                 var p=permIndex[pid];
@@ -277,7 +329,7 @@
             if(pids.length===0){ body.innerHTML='<div class="qempty">没有待批准的请求</div>'; return; }
             var groups={}; pids.forEach(function(pid){var p=permIndex[pid];(groups[p.sid]=groups[p.sid]||[]).push(p);});
             Object.keys(groups).forEach(function(sid){
-                var g=el('div','qg'); g.innerHTML='<div class="qgt">'+esc((sessions[sid]&&sessions[sid].title)||('sid·'+sid.slice(-5)))+'</div>';
+                var g=el('div','qg'); g.innerHTML='<div class="qgt">'+esc(tabTitle(sid))+'</div>';
                 groups[sid].forEach(function(p){
                     var qi=el('div','qi'); qi.innerHTML='<span class="qd"></span><span class="qc">'+esc(p.cmdText||p.title)+'</span>';
                     qi.onclick=function(){ switchTo(sid); $('#queue').classList.remove('show'); p.el.scrollIntoView({behavior:'smooth',block:'center'}); p.el.classList.add('flash'); setTimeout(function(){p.el.classList.remove('flash');},1400); };
@@ -285,6 +337,29 @@
                 });
                 body.appendChild(g);
             });
+        }
+        /* 历史抽屉 */
+        function renderHist(){
+            var body=$('#histBody'); body.innerHTML='';
+            if(!histList.length){ body.innerHTML='<div class="hempty">还没有历史会话<br>（中继启动时拉取，或点📜刷新）</div>'; $('#histCount').textContent=''; return; }
+            $('#histCount').textContent=histList.length+' 条';
+            histList.forEach(function(s){
+                var active=!!sessions[s.sessionId];
+                var item=el('div','hitem'+(active?' act':''));
+                item.innerHTML='<span class="hd '+(active?'act':'his')+'"></span>'+
+                    '<div class="hm"><div class="ht2">'+esc(s.title||'（无标题）')+'</div>'+
+                    '<div class="hs"><span>'+esc(relTime(s.updatedAt))+'</span><span class="cw">'+esc(cwdTail(s.cwd))+'</span></div></div>'+
+                    '<span class="ha">'+(active?'活跃':'历史')+'</span>';
+                item.onclick=function(){ openHistoryItem(s); };
+                body.appendChild(item);
+            });
+        }
+        function openHistoryItem(s){
+            ensureSession(s.sessionId);           // 乐观创建/复用
+            if(!sessions[s.sessionId].title && s.title) sessions[s.sessionId].title=null; // 顶栏用 meta title 兜底
+            switchTo(s.sessionId);
+            send('open_history', s.sessionId, {sessionId:s.sessionId, cwd:s.cwd});
+            $('#hist').classList.remove('show'); $('#histbtn').classList.remove('on');
         }
         function send(type,sessionId,payload){
             if(!ws||ws.readyState!==1)return;
@@ -294,13 +369,21 @@
         function handle(env){
             logLine('down',env.type,env.payload?JSON.stringify(env.payload):'');
             switch(env.type){
-                case 'session.created': ensureSession(env.sessionId,env.payload&&env.payload.configOptions); break;
+                case 'session.created':
+                    ensureSession(env.sessionId,env.payload&&env.payload.configOptions);
+                    if(env.payload&&env.payload.resumed && !resumedShown[env.sessionId]){ resumedShown[env.sessionId]=true; insertSysCard(env.sessionId); }
+                    break;
                 case 'session.update': renderUpdate(env.sessionId,env.payload); break;
                 case 'permission.request': addPerm(env); break;
                 case 'permission.invalidate': invalidateAll(); break;
                 case 'relay.state':
                     if(env.payload&&env.payload.state==='degraded'){ $('#banner').classList.add('show'); $('#bannerTxt').textContent='Kimi 离线（🟡）· 点重试拉起'; }
                     else { $('#banner').classList.remove('show'); }
+                    break;
+                case 'session.list':
+                    meta={}; histList=(env.payload&&env.payload.sessions||[]).slice().sort(function(a,b){ return new Date(b.updatedAt)-new Date(a.updatedAt); });
+                    histList.forEach(function(s){ meta[s.sessionId]=s; });
+                    renderHist(); renderTabs();
                     break;
                 case 'relay.error':
                     var e=el('div','blk reply'); e.style.color='var(--coral)'; e.textContent='⚠ '+((env.payload&&env.payload.message)||'error');
@@ -309,7 +392,7 @@
         }
         function connect(){
             ws=new WebSocket('ws://'+location.hostname+':7331/ws');
-            ws.onopen=function(){ $('#live').classList.add('on'); clearAll(); }; // 重连清屏，等 snapshot 重建
+            ws.onopen=function(){ $('#live').classList.add('on'); clearAll(); };
             ws.onclose=function(){ $('#live').classList.remove('on'); setTimeout(connect,1500); };
             ws.onmessage=function(ev){ try{handle(JSON.parse(ev.data));}catch(e){} };
         }
@@ -321,7 +404,16 @@
         $('#badge').onclick=function(e){ e.stopPropagation(); $('#queue').classList.toggle('show'); };
         $('#retryBtn').onclick=function(){ send('restart_kimi',null,{}); };
         $('#killBtn').onclick=function(){ send('debug_kill_kimi',null,{}); };
-        document.addEventListener('click',function(e){ if(!e.target.closest('#queue')&&!e.target.closest('#badge'))$('#queue').classList.remove('show'); });
+        $('#histbtn').onclick=function(e){
+            e.stopPropagation();
+            var on=$('#hist').classList.toggle('show'); $('#histbtn').classList.toggle('on',on);
+            if(on) send('list_sessions',null,{}); // 每次打开刷新，保证最新
+        };
+        $('#histClose').onclick=function(){ $('#hist').classList.remove('show'); $('#histbtn').classList.remove('on'); };
+        document.addEventListener('click',function(e){
+            if(!e.target.closest('#queue')&&!e.target.closest('#badge'))$('#queue').classList.remove('show');
+            if(!e.target.closest('#hist')&&!e.target.closest('#histbtn')){ $('#hist').classList.remove('show'); $('#histbtn').classList.remove('on'); }
+        });
         connect();
     })();
 </script>
