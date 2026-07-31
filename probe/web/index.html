@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SENTINEL · relay 验证台 · 历史会话</title>
+    <title>SENTINEL · relay 验证台 · 历史回放</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
@@ -74,6 +74,10 @@
         .thought .tb>div{overflow:hidden}
         .thought .tb p{padding:0 12px 10px;font-size:11.5px;color:var(--faint);font-style:italic;white-space:pre-wrap;line-height:1.6}
         .reply{font-size:14px;line-height:1.65;white-space:pre-wrap}
+        /* 用户气泡（历史回放里的"你"） */
+        .huser{background:rgba(45,212,191,.08);border:1px solid rgba(45,212,191,.22);border-radius:12px;padding:10px 13px;display:flex;gap:10px;align-items:flex-start}
+        .huser .hu-tag{flex:none;font-family:var(--mono);font-size:10px;font-weight:600;color:var(--teal);background:rgba(45,212,191,.16);border-radius:6px;padding:2px 8px;margin-top:1px}
+        .huser .hu-text{font-size:13.5px;color:var(--txt);line-height:1.6;white-space:pre-wrap;flex:1}
         .tool{border:1px solid var(--line);border-radius:11px;background:var(--ink2);padding:10px 12px;position:relative;overflow:hidden}
         .tool::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--sky)}
         .tool.done::before{background:var(--green)}.tool.failed::before{background:var(--coral)}
@@ -82,7 +86,6 @@
         .tool .tc{font-family:var(--mono);font-size:11px;color:var(--txt);background:var(--ink0);border:1px solid var(--line);border-radius:7px;padding:7px 9px;margin-top:8px;white-space:pre-wrap}
         .tool .to{font-family:var(--mono);font-size:10.5px;color:var(--green);margin-top:7px;white-space:pre-wrap}
         .tool.failed .to{color:var(--coral)}
-        /* 诚实卡 */
         .syscard{border:1px solid rgba(245,165,36,.3);border-left:3px solid var(--amber);border-radius:11px;background:rgba(245,165,36,.06);padding:11px 13px;font-size:12px;color:var(--amber);line-height:1.55;display:flex;gap:9px;align-items:flex-start}
         .syscard .si{font-size:15px;flex:none;line-height:1.2}
         .syscard .st2{color:var(--dim)}
@@ -101,7 +104,6 @@
         .perm.resolved{animation:none;opacity:.55}.perm.resolved::before{background:var(--faint)}
         .perm.invalid{animation:none;opacity:.5;border-color:var(--line)}.perm.invalid::before{background:var(--faint)}
         .perm.flash{outline:2px solid var(--teal);outline-offset:2px}
-        /* 历史抽屉 */
         .hist{position:absolute;top:50px;left:10px;right:10px;bottom:10px;background:var(--ink2);border:1px solid var(--line);border-radius:16px;box-shadow:0 30px 70px rgba(0,0,0,.6);z-index:70;display:none;flex-direction:column;overflow:hidden;animation:rise .25s both}
         .hist.show{display:flex}
         .hist .hh{display:flex;align-items:center;gap:9px;padding:14px 16px;border-bottom:1px solid var(--line)}
@@ -123,7 +125,6 @@
         .hitem .ha{font-family:var(--mono);font-size:9px;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);flex:none;align-self:flex-start;margin-top:2px}
         .hitem.act .ha{color:var(--green)}
         .hist .hempty{padding:40px 20px;text-align:center;color:var(--faint);font-size:12.5px;line-height:1.7}
-        /* 待批准队列 */
         .queue{position:absolute;top:50px;right:12px;width:340px;max-height:70vh;overflow-y:auto;background:var(--ink2);border:1px solid var(--line);border-radius:14px;box-shadow:0 24px 60px rgba(0,0,0,.55);z-index:80;display:none;flex-direction:column}
         .queue.show{display:flex}
         .queue .qh{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);padding:12px 14px;border-bottom:1px solid var(--line)}
@@ -145,7 +146,7 @@
 <body>
 <div class="app">
     <div class="col">
-        <div class="col-h"><span class="live" id="live"></span> 控制台 · 历史会话</div>
+        <div class="col-h"><span class="live" id="live"></span> 控制台 · 历史回放</div>
         <div class="ctrl">
             <div class="brand">SENTINEL <b>relay</b></div>
             <div class="banner" id="banner"><span class="bi">⚠</span><span id="bannerTxt">Kimi 离线（🟡）</span><button class="bbtn" id="retryBtn">重试拉起</button></div>
@@ -159,7 +160,7 @@
                     <button class="btn" data-mode="yolo">🚀 YOLO</button>
                 </div></div>
             <div class="field"><label>遥控输入（发给 C 位）</label>
-                <textarea class="inp" id="inp" placeholder="例：你还记得我们之前聊的吗&#10;或 /status"></textarea></div>
+                <textarea class="inp" id="inp" placeholder="点📜选历史会话回放，可继续对话&#10;或 /status"></textarea></div>
             <div class="row">
                 <button class="btn teal" id="sendBtn">发送 ↑</button>
                 <button class="btn" id="stopBtn">停</button>
@@ -167,7 +168,7 @@
             <div class="row">
                 <button class="btn coral" id="killBtn" title="仅开发期：强杀 kimi 子进程">💀 模拟崩溃</button>
             </div>
-            <div class="note">历史会话验证台：顶栏📜打开历史抽屉（Kimi 持久化的全部会话，按时间倒序）。🟢=本次活跃可看流；📜=历史，点过去 resume 恢复上下文（旧全文未缓存，显示诚实卡）。</div>
+            <div class="note">历史回放验证台：顶栏📜打开历史抽屉，点历史会话→读 Kimi 本地 wire.jsonl 逐字回放（用户/思考/回复/工具卡），agent 已恢复上下文可直接继续。</div>
         </div>
     </div>
 
@@ -198,22 +199,18 @@
         function el(t,c){var e=document.createElement(t);if(c)e.className=c;return e;}
         function esc(s){return String(s).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});}
 
-        var ws=null, currentSid=null, sessions={}, permIndex={}, meta={}, resumedShown={}, histList=[];
+        var ws=null, currentSid=null, sessions={}, permIndex={}, meta={}, resumedShown={}, historyRendered={}, histList=[];
 
         function relTime(iso){
             if(!iso) return '';
-            var d=new Date(iso), now=Date.now(), diff=(now-d.getTime())/1000;
+            var d=new Date(iso), diff=(Date.now()-d.getTime())/1000;
             if(diff<60) return '刚刚';
             if(diff<3600) return Math.floor(diff/60)+' 分钟前';
             if(diff<86400) return Math.floor(diff/3600)+' 小时前';
             if(diff<86400*7) return Math.floor(diff/86400)+' 天前';
             return d.toLocaleDateString('zh-CN',{month:'short',day:'numeric'});
         }
-        function cwdTail(cwd){
-            if(!cwd) return '';
-            var parts=cwd.split('/').filter(function(p){return p.length>0;});
-            return parts.slice(-2).join('/');
-        }
+        function cwdTail(cwd){ if(!cwd)return ''; var p=cwd.split('/').filter(function(x){return x.length>0;}); return p.slice(-2).join('/'); }
         function logLine(dir,type,raw){
             var e=el('div','ln '+(dir==='up'?'up':(type==='relay.error'||type==='relay.state'?'err':'')));
             var t=new Date().toLocaleTimeString('en-GB');
@@ -221,7 +218,7 @@
             var L=$('#log');L.appendChild(e);L.scrollTop=L.scrollHeight;
         }
         function clearAll(){
-            sessions={}; permIndex={}; meta={}; resumedShown={}; histList=[]; currentSid=null;
+            sessions={}; permIndex={}; meta={}; resumedShown={}; historyRendered={}; histList=[]; currentSid=null;
             $('#stream').innerHTML='<div class="empty-stream" id="emptyStream">等待会话建立…</div>';
             Array.prototype.slice.call($('#tabsbar').querySelectorAll('.tab')).forEach(function(t){t.remove();});
             $('#sid').textContent='— 等待会话 —'; $('#badge').style.display='none';
@@ -272,12 +269,35 @@
             if((status==='completed'||status==='failed')&&!d.querySelector('.to')){ var o=el('div','to'); o.textContent=(status==='failed'?'✗ ':'✓ ')+(rawOutput||''); d.appendChild(o); }
             scrollStream();
         }
-        function insertSysCard(sid){
-            var st=sessions[sid]; if(!st)return;
+        /* 历史回放渲染 */
+        function renderHistory(sid, blocks, title, count){
+            var st=ensureSession(sid);
+            st.wrap.innerHTML=''; st.thought=null; st.reply=null; st.tools={};
             var t=(meta[sid]&&meta[sid].updatedAt)?(' · 上次活跃 '+relTime(meta[sid].updatedAt)):'';
+            var sys=el('div','blk syscard');
+            sys.innerHTML='<span class="si">📜</span><span><b>历史回放</b>（'+(count||0)+' 段）· 来自 Kimi 本地存储 · agent 已恢复上下文，可直接继续对话。<span class="st2">'+esc(title||'')+esc(t)+'</span></span>';
+            st.wrap.appendChild(sys);
+            (blocks||[]).forEach(function(b){
+                if(b.kind==='user'){
+                    var u=el('div','blk huser'); u.innerHTML='<div class="hu-tag">你</div><div class="hu-text">'+esc(b.text)+'</div>'; st.wrap.appendChild(u);
+                } else if(b.kind==='think'){
+                    var th=el('div','blk thought'); th.innerHTML='<div class="th"><span class="ti">▸</span> 思考</div><div class="tb"><div><p>'+esc(b.text)+'</p></div></div>';
+                    th.querySelector('.th').onclick=function(){th.classList.toggle('open');}; st.wrap.appendChild(th);
+                } else if(b.kind==='text'){
+                    var r=el('div','blk reply'); r.textContent=b.text; st.wrap.appendChild(r);
+                } else if(b.kind==='tool'){
+                    var tl=el('div','blk tool done');
+                    tl.innerHTML='<div class="tt">▣ '+esc(b.toolName||'tool')+'<span class="st">历史</span></div>'+(b.command?'<div class="tc">'+esc(b.command)+'</div>':'')+(b.output?'<div class="to">'+esc(b.output)+'</div>':'');
+                    st.wrap.appendChild(tl);
+                }
+            });
+            scrollStream();
+        }
+        function insertFallbackCard(sid){
+            var st=sessions[sid]; if(!st)return;
             var d=el('div','blk syscard');
-            d.innerHTML='<span class="si">📜</span><span><b>历史会话</b> · agent 已恢复上下文，可直接继续对话。<span class="st2">旧对话的逐字内容未在中继缓存（Kimi 不重放历史），故此处不回看全文。'+esc(t)+'</span></span>';
-            st.wrap.insertBefore(d, st.wrap.firstChild);
+            d.innerHTML='<span class="si">📜</span><span><b>历史会话</b> · agent 已恢复上下文，可继续对话。<span class="st2">该会话无可回放的本地记录（或读取失败）。</span></span>';
+            st.wrap.appendChild(d);
         }
         function renderUpdate(sid,update){
             var st=ensureSession(sid);
@@ -338,7 +358,6 @@
                 body.appendChild(g);
             });
         }
-        /* 历史抽屉 */
         function renderHist(){
             var body=$('#histBody'); body.innerHTML='';
             if(!histList.length){ body.innerHTML='<div class="hempty">还没有历史会话<br>（中继启动时拉取，或点📜刷新）</div>'; $('#histCount').textContent=''; return; }
@@ -355,8 +374,7 @@
             });
         }
         function openHistoryItem(s){
-            ensureSession(s.sessionId);           // 乐观创建/复用
-            if(!sessions[s.sessionId].title && s.title) sessions[s.sessionId].title=null; // 顶栏用 meta title 兜底
+            ensureSession(s.sessionId);
             switchTo(s.sessionId);
             send('open_history', s.sessionId, {sessionId:s.sessionId, cwd:s.cwd});
             $('#hist').classList.remove('show'); $('#histbtn').classList.remove('on');
@@ -371,9 +389,13 @@
             switch(env.type){
                 case 'session.created':
                     ensureSession(env.sessionId,env.payload&&env.payload.configOptions);
-                    if(env.payload&&env.payload.resumed && !resumedShown[env.sessionId]){ resumedShown[env.sessionId]=true; insertSysCard(env.sessionId); }
+                    if(env.payload&&env.payload.resumed && !historyRendered[env.sessionId]){ insertFallbackCard(env.sessionId); }
                     break;
                 case 'session.update': renderUpdate(env.sessionId,env.payload); break;
+                case 'session.history':
+                    renderHistory(env.sessionId, env.payload&&env.payload.blocks, env.payload&&env.payload.title, env.payload&&env.payload.count);
+                    historyRendered[env.sessionId]=true;
+                    break;
                 case 'permission.request': addPerm(env); break;
                 case 'permission.invalidate': invalidateAll(); break;
                 case 'relay.state':
@@ -407,7 +429,7 @@
         $('#histbtn').onclick=function(e){
             e.stopPropagation();
             var on=$('#hist').classList.toggle('show'); $('#histbtn').classList.toggle('on',on);
-            if(on) send('list_sessions',null,{}); // 每次打开刷新，保证最新
+            if(on) send('list_sessions',null,{});
         };
         $('#histClose').onclick=function(){ $('#hist').classList.remove('show'); $('#histbtn').classList.remove('on'); };
         document.addEventListener('click',function(e){

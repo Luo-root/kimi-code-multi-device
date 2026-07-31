@@ -10,13 +10,15 @@ import (
 	"time"
 
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/acp"
+	"github.com/Luo-root/kimi-code-multi-device/relay/internal/replay"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/session"
 	"github.com/gorilla/websocket"
 )
 
 type Relay struct {
-	acp   *acp.Client
-	store *session.Store
+	acp      *acp.Client
+	store    *session.Store
+	kimiHome string
 
 	mu      sync.RWMutex
 	clients map[*client]bool
@@ -29,12 +31,18 @@ type client struct {
 }
 
 func New() *Relay {
-	return &Relay{store: session.New(), clients: map[*client]bool{}}
+	return &Relay{
+		store:    session.New(),
+		kimiHome: replay.DefaultHome(),
+		clients:  map[*client]bool{},
+	}
 }
 
 func (r *Relay) Start() error {
-	if os.Getenv("KIMI_CODE_HOME") == "" {
-		log.Println("[relay] 警告：未设置 KIMI_CODE_HOME，可能 Authentication required")
+	if r.kimiHome == "" {
+		log.Println("[relay] 警告：无法确定 KIMI_CODE_HOME，历史回放不可用")
+	} else {
+		log.Printf("[relay] KIMI_CODE_HOME = %s", r.kimiHome)
 	}
 	ac, err := acp.New(acp.Handlers{
 		OnUpdate:     r.onUpdate,
@@ -59,7 +67,6 @@ func (r *Relay) Start() error {
 	if _, err := r.newSession(ctx, cwd); err != nil {
 		return err
 	}
-	// 启动时拉一次历史列表缓存（此时无 client，broadcast 空跑，靠 snapshot 补发）
 	if err := r.refreshHistory(ctx); err != nil {
 		log.Printf("[relay] 启动拉取历史列表失败: %v", err)
 	}
@@ -94,7 +101,6 @@ func (r *Relay) newSession(ctx context.Context, cwd string) (string, error) {
 	return res.SessionID, nil
 }
 
-// refreshHistory 调 session/list（空参=全部）并存缓存。
 func (r *Relay) refreshHistory(ctx context.Context) error {
 	m, err := r.acp.Request(ctx, "session/list", map[string]any{})
 	if err != nil {
@@ -108,7 +114,6 @@ func (r *Relay) refreshHistory(ctx context.Context) error {
 	return nil
 }
 
-// listSessions 上行：刷新缓存并广播给所有端。
 func (r *Relay) listSessions() {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -119,9 +124,9 @@ func (r *Relay) listSessions() {
 	r.broadcast(Env{Type: DownSessionList, Payload: mustJSON(DownSessionListPayload{Sessions: r.store.History()})})
 }
 
-// openHistory 打开一个历史会话：活跃则直接补发，否则 resume 恢复上下文。
+// openHistory 打开历史会话：活跃则直接补发；否则 resume 恢复上下文 + 读 wire.jsonl 回放。
 func (r *Relay) openHistory(sid, cwd string) {
-	// 活跃（中继已有流尾部）：直接补发 created，前端切过去看流
+	// 活跃会话（中继已有流尾部）：直接补发 created
 	if len(r.store.Tail(sid)) > 0 {
 		r.broadcast(Env{
 			Type:      DownSessionCreated,
@@ -130,7 +135,7 @@ func (r *Relay) openHistory(sid, cwd string) {
 		})
 		return
 	}
-	// 历史：resume 恢复 Kimi 侧上下文（旧消息不重放，前端显示诚实卡）
+	// 历史会话：resume 恢复 Kimi 侧上下文
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	m, err := r.acp.Request(ctx, "session/resume", map[string]any{"sessionId": sid, "cwd": cwd})
@@ -146,6 +151,19 @@ func (r *Relay) openHistory(sid, cwd string) {
 	if len(res.ConfigOptions) > 0 {
 		r.store.SetConfig(sid, res.ConfigOptions)
 	}
+	// 读历史回放（先于 created 发送，前端按序处理：先渲染历史，再据 resumed 决定是否兜底）
+	blocks, meta, herr := replay.LoadHistory(r.kimiHome, sid)
+	if herr != nil {
+		log.Printf("[relay] 读取历史回放失败 %s: %v", sid, herr)
+	}
+	if blocks == nil {
+		blocks = []replay.Block{}
+	}
+	r.broadcast(Env{
+		Type:      DownSessionHistory,
+		SessionID: sid,
+		Payload:   mustJSON(DownSessionHistoryPayload{Blocks: blocks, Title: meta.Title, Count: len(blocks)}),
+	})
 	r.broadcast(Env{
 		Type:      DownSessionCreated,
 		SessionID: sid,
@@ -295,7 +313,6 @@ func (r *Relay) readPump(c *client) {
 	}
 }
 
-// snapshot 补发：活跃会话(created+流尾部) + 历史列表。阻塞写不丢帧。
 func (r *Relay) snapshot(c *client) {
 	for _, sid := range r.store.SIDs() {
 		opts := r.store.Snapshot()[sid]

@@ -3,6 +3,7 @@ package relay
 import (
 	"encoding/json"
 
+	"github.com/Luo-root/kimi-code-multi-device/relay/internal/replay"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/session"
 )
 
@@ -19,7 +20,8 @@ const (
 	DownPermRequest    = "permission.request"
 	DownPermInvalidate = "permission.invalidate"
 	DownRelayState     = "relay.state"
-	DownSessionList    = "session.list" // 历史会话元信息列表
+	DownSessionList    = "session.list"
+	DownSessionHistory = "session.history" // 历史回放内容块
 	DownRelayError     = "relay.error"
 )
 
@@ -33,8 +35,8 @@ const (
 	UpSetModel     = "set_model"
 	UpRestartKimi  = "restart_kimi"
 	UpDebugKill    = "debug_kill_kimi"
-	UpListSessions = "list_sessions" // 拉取历史列表
-	UpOpenHistory  = "open_history"  // 打开/恢复一个历史会话
+	UpListSessions = "list_sessions"
+	UpOpenHistory  = "open_history"
 )
 
 // 上行 payload
@@ -67,10 +69,15 @@ type DownPermRequestPayload struct {
 }
 type DownSessionCreatedPayload struct {
 	ConfigOptions json.RawMessage `json:"configOptions"`
-	Resumed       bool            `json:"resumed,omitempty"` // true=历史会话经 resume 恢复，端应显示诚实卡
+	Resumed       bool            `json:"resumed,omitempty"`
 }
 type DownSessionListPayload struct {
 	Sessions []session.SessionMeta `json:"sessions"`
+}
+type DownSessionHistoryPayload struct {
+	Blocks []replay.Block `json:"blocks"`
+	Title  string         `json:"title,omitempty"`
+	Count  int            `json:"count"`
 }
 type DownRelayStatePayload struct {
 	State string `json:"state"`
