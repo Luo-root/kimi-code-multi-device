@@ -143,8 +143,8 @@ func main() {
 	fmt.Println("\n========== 进程2：resume 该会话 ==========")
 	c2 := spawn()
 	initialize(c2)
-	fmt.Println(">>> 进程2 发 session/resume，参数 {sessionId}")
-	m2, ok := c2.request("session/resume", map[string]interface{}{"sessionId": sid})
+	fmt.Println(">>> 进程2 发 session/resume，参数 {sessionId, cwd}")
+	m2, ok := c2.request("session/resume", map[string]interface{}{"sessionId": sid, "cwd": wd})
 	if !ok {
 		fmt.Println(">>> session/resume: 无响应（超时）")
 	} else if len(m2.Error) > 0 {
