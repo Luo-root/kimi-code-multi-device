@@ -147,6 +147,8 @@ agent 不该在需要你时傻等，也不该擅自做危险决定。三类时�
 | 自定义 provider 可绕会员、capabilities 需 tool_use           | config + 实测              | 模型配置图形化            |
 | 登录 = device-code 一次性、手机端不碰                        | authMethods                | 登录归电脑端              |
 | 原生配置命令 mcp-config / update-config / sub-skill          | available_commands         | v2 配置写走原生命令       |
+| session/set_mode 用 modeId（非 mode）；set_config_option 用 configId+value | setmode 探针：modeId 报错→改后 OK，config_option_update 回推 | 会话头切 mode/model 的精确参数 |
+| slash 命令 = session/prompt 发 `/xxx` 文本，输出走 message_chunk | slash 探针：/status 返回结构化状态 | 中继无需为 slash 特殊处理 |
 
 ---
 
@@ -185,7 +187,7 @@ agent 不该在需要你时傻等，也不该擅自做危险决定。三类时�
 | 职责          | 干什么                                                       |
 | ------------- | ------------------------------------------------------------ |
 | ① ACP client  | spawn 并持有 kimi acp；发 initialize / session/new / prompt / cancel / set_mode；收 session/update 流；**应答 request_permission** |
-| ② 会话状态机  | 每个 sid 一份 state：当前 mode、流缓冲、工具调用生命周期、**待批准 permission 队列**、最后活跃时间 |
+| ② 会话状态机  | 每个 sid 一份 state：当前 mode、流缓冲、工具调用生命周期、**待批准 permission 队列**、最后活跃时间。会话状态机除待批准队列外，还需处理一种 update 类型 config_option_update（旁路更新该 sid 的配置快照，供新连接补发）。 |
 | ③ 许可裁决器  | 收到 permission → 查该 sid 的 mode 策略 → manual：转端等回应 + **超时默认拒绝**；yolo/auto：自动回 allow_once；plan：不应有工具调用，出现即记异常 |
 | ④ 多端广播器  | state 变化 → 推给所有连着的端（v1 只有手机，但按多端写）     |
 | ⑤ 状态持久化  | state 落盘，中继重启 / 端重连能续上，不丢"它正等你批准"      |
@@ -509,17 +511,17 @@ agent 忙时又发一句 Kimi 怎么处理，v0 没测；v1 输入框始终可�
 
 > 所有🔴集中，**每条带退路**——查不通也不致命，产品降级但不塌。这是设计卷诚实的底色。
 
-| #    | 问题                                                   | 若不通的退路                             |
-| ---- | ------------------------------------------------------ | ---------------------------------------- |
-| 1    | 会话级 set mode/model 的 ACP method 名与可用性（命门） | 会话头退化为只读可见当前值，新建时选     |
-| 2    | slash 命令的 ACP 发送方式                              | 大概率发 `/xxx` 文本，验之               |
-| 3    | Kimi 的 MCP 热重载能力                                 | 不能则"开关 MCP"从 v1.5 移到 v2 原生命令 |
-| 4    | MCP 连接状态能否结构化获取                             | 拿不到则体检只显示"已配置"               |
-| 5    | session/new 能否带初始 model/mode                      | set 不通时的二级退路                     |
-| 6    | 保活 API 跨平台（Windows 优先验）                      | 该平台降级为"仅提示"                     |
-| 7    | 单会话批卡是否真发生                                   | 备而不用，退化逐张卡                     |
-| 8    | agent 忙时插话语义                                     | 输入侧不加逻辑，靠「停」+ 重发           |
-| 9    | 单会话卡 S1 是否冻住全进程                             | 退到"一会话一 kimi 进程"                 |
+| #    | 状态 | 问题                                                   | 若不通的退路                                                                 |
+| ---- | ---- | ------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| 1    | ✅   | 会话级 set mode/model 的 ACP method 名与可用性（命门） | 已证实：modeId / configId+value，且切换后 Kimi 主动推 config_option_update，中继据此更新快照并广播 |
+| 2    | ✅   | slash 命令的 ACP 发送方式                              | 大概率发 `/xxx` 文本，验之                                                   |
+| 3    | 🔴   | Kimi 的 MCP 热重载能力                                 | 不能则"开关 MCP"从 v1.5 移到 v2 原生命令 |
+| 4    | 🔴   | MCP 连接状态能否结构化获取                             | 拿不到则体检只显示"已配置"               |
+| 5    | 🔴   | session/new 能否带初始 model/mode                      | set 不通时的二级退路                     |
+| 6    | 🔴   | 保活 API 跨平台（Windows 优先验）                      | 该平台降级为"仅提示"                     |
+| 7    | 🔴   | 单会话批卡是否真发生                                   | 备而不用，退化逐张卡                     |
+| 8    | 🔴   | agent 忙时插话语义                                     | 输入侧不加逻辑，靠「停」+ 重发           |
+| 9    | 🔴   | 单会话卡 S1 是否冻住全进程                             | 退到"一会话一 kimi 进程"                 |
 
 ---
 
