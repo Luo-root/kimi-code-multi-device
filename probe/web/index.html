@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SENTINEL · relay 验证台</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root{
+            --ink0:#070b0e;--ink1:#0b1115;--ink2:#101a1f;--ink3:#16242a;--ink4:#1f333b;
+            --teal:#2dd4bf;--teal-d:#0f766e;--amber:#f5a524;--coral:#ff5d5d;--green:#34d399;--sky:#38bdf8;
+            --txt:#e9f2f0;--dim:#97acaa;--faint:#5e7270;--line:rgba(124,164,160,.13);
+            --disp:'Space Grotesk',sans-serif;--mono:'JetBrains Mono',monospace;--body:'IBM Plex Sans',sans-serif;
+        }
+        *{box-sizing:border-box;margin:0;padding:0}
+        body{font-family:var(--body);color:var(--txt);background:var(--ink0);height:100vh;overflow:hidden;-webkit-font-smoothing:antialiased}
+        body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+            background:radial-gradient(800px 500px at 12% 0%,rgba(45,212,191,.08),transparent 60%),
+            radial-gradient(700px 600px at 100% 100%,rgba(56,189,248,.05),transparent 60%),linear-gradient(180deg,#06090c,#0a0f13)}
+        .app{position:relative;z-index:1;display:grid;grid-template-columns:300px 1fr 320px;height:100vh}
+        .col{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line)}
+        .col:last-child{border-right:none}
+        .col-h{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint);padding:14px 16px 10px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
+        .col-h .live{width:7px;height:7px;border-radius:50%;background:var(--faint)}
+        .col-h .live.on{background:var(--green);box-shadow:0 0 0 0 rgba(52,211,153,.5);animation:p 2s infinite}
+        @keyframes p{0%{box-shadow:0 0 0 0 rgba(52,211,153,.5)}70%{box-shadow:0 0 0 7px rgba(52,211,153,0)}100%{box-shadow:0 0 0 0 rgba(52,211,153,0)}}
+
+        /* control column */
+        .ctrl{padding:14px 16px;overflow-y:auto;display:flex;flex-direction:column;gap:14px}
+        .brand{font-family:var(--disp);font-weight:700;font-size:15px;letter-spacing:.04em}
+        .brand b{color:var(--teal)}
+        .field label{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);display:block;margin-bottom:6px}
+        .sidbox{font-family:var(--mono);font-size:11px;color:var(--teal);background:var(--ink2);border:1px solid var(--line);border-radius:9px;padding:9px 11px;word-break:break-all;min-height:38px}
+        .sidbox.empty{color:var(--faint)}
+        .btn{font-family:var(--body);font-weight:600;font-size:12.5px;padding:9px 12px;border-radius:10px;border:1px solid var(--line);background:var(--ink3);color:var(--txt);cursor:pointer;transition:.15s;width:100%}
+        .btn:hover{background:var(--ink4);transform:translateY(-1px)}
+        .btn:active{transform:scale(.98)}
+        .btn.teal{background:var(--teal);color:#04201c;border-color:var(--teal)}
+        .btn.teal:hover{background:#3ee0cb}
+        .row{display:flex;gap:7px}
+        .row .btn{flex:1}
+        .modes{display:grid;grid-template-columns:1fr 1fr;gap:7px}
+        .modes .btn{font-size:11px;padding:8px 6px}
+        .modes .btn.sel{border-color:var(--teal);color:var(--teal);background:rgba(45,212,191,.08)}
+        .inp{width:100%;background:var(--ink2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;color:var(--txt);font-family:var(--body);font-size:13px;resize:vertical;min-height:64px}
+        .inp:focus{outline:none;border-color:var(--teal-d)}
+        .note{font-size:11px;color:var(--faint);line-height:1.5}
+
+        /* stream column */
+        .stream{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px;scrollbar-width:thin}
+        .stream::-webkit-scrollbar{width:7px}.stream::-webkit-scrollbar-thumb{background:var(--ink3);border-radius:4px}
+        .empty-stream{margin:auto;color:var(--faint);font-size:13px;text-align:center;max-width:300px;line-height:1.7}
+        .blk{animation:rise .35s both}
+        @keyframes rise{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}
+        .thought{border:1px solid var(--line);border-radius:11px;background:var(--ink2);overflow:hidden}
+        .thought .th{padding:8px 12px;font-size:11.5px;color:var(--dim);cursor:pointer;display:flex;gap:7px;align-items:center}
+        .thought .th .ti{color:var(--faint);transition:transform .2s}
+        .thought.open .th .ti{transform:rotate(90deg)}
+        .thought .tb{display:grid;grid-template-rows:0fr;transition:grid-template-rows .25s}
+        .thought.open .tb{grid-template-rows:1fr}
+        .thought .tb>div{overflow:hidden}
+        .thought .tb p{padding:0 12px 10px;font-size:11.5px;color:var(--faint);font-style:italic;white-space:pre-wrap;line-height:1.6}
+        .reply{font-size:14px;line-height:1.65;white-space:pre-wrap}
+        .tool{border:1px solid var(--line);border-radius:11px;background:var(--ink2);padding:10px 12px;position:relative;overflow:hidden}
+        .tool::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--sky)}
+        .tool.done::before{background:var(--green)} .tool.failed::before{background:var(--coral)}
+        .tool .tt{font-family:var(--mono);font-size:11px;color:var(--dim);display:flex;gap:8px;align-items:center}
+        .tool .tt .st{margin-left:auto;font-size:9.5px;letter-spacing:.05em;text-transform:uppercase}
+        .tool .tc{font-family:var(--mono);font-size:11px;color:var(--txt);background:var(--ink0);border:1px solid var(--line);border-radius:7px;padding:7px 9px;margin-top:8px;white-space:pre-wrap}
+        .tool .to{font-family:var(--mono);font-size:10.5px;color:var(--green);margin-top:7px;white-space:pre-wrap}
+        .tool.failed .to{color:var(--coral)}
+        /* approval card */
+        .perm{border:1px solid rgba(245,165,36,.4);border-radius:13px;background:linear-gradient(180deg,rgba(245,165,36,.06),var(--ink2));padding:13px;position:relative;overflow:hidden;animation:rise .35s both,glow 1.8s ease-in-out infinite}
+        @keyframes glow{0%,100%{box-shadow:0 0 0 0 rgba(245,165,36,0)}50%{box-shadow:0 0 0 3px rgba(245,165,36,.12)}}
+        .perm::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--amber)}
+        .perm .ph{display:flex;align-items:center;gap:9px;margin-bottom:9px}
+        .perm .ph .pi{width:26px;height:26px;border-radius:8px;background:rgba(245,165,36,.15);color:var(--amber);display:grid;place-items:center;font-size:13px}
+        .perm .ph .pt{font-family:var(--disp);font-weight:600;font-size:13px}
+        .perm .ph .pw{margin-left:auto;font-family:var(--mono);font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:var(--amber)}
+        .perm .pcmd{font-family:var(--mono);font-size:11.5px;color:var(--txt);background:var(--ink0);border:1px solid var(--line);border-radius:8px;padding:8px 10px;white-space:pre-wrap}
+        .perm .pact{display:flex;gap:7px;margin-top:11px}
+        .perm .pact .btn{flex:1}
+        .perm .pact .ok{background:var(--green);color:#04201c;border-color:var(--green)}
+        .perm .pact .ok:hover{background:#46e0a6}
+        .perm .pact .no{color:var(--coral);border-color:rgba(255,93,93,.35)}
+        .perm .pact .no:hover{background:rgba(255,93,93,.12)}
+        .perm.resolved{animation:none;opacity:.55}
+        .perm.resolved::before{background:var(--faint)}
+
+        /* log column */
+        .log{flex:1;overflow-y:auto;padding:10px 12px;font-family:var(--mono);font-size:10.5px;line-height:1.6;color:var(--faint);scrollbar-width:thin}
+        .log::-webkit-scrollbar{width:6px}.log::-webkit-scrollbar-thumb{background:var(--ink3);border-radius:3px}
+        .log .ln{padding:2px 0;border-bottom:1px solid rgba(124,164,160,.05);word-break:break-all}
+        .log .ln .t{color:var(--teal-d)}
+        .log .ln.up .t{color:var(--sky)}
+        .log .ln.err .t{color:var(--coral)}
+    </style>
+</head>
+<body>
+<div class="app">
+
+    <!-- 控制列 -->
+    <div class="col">
+        <div class="col-h"><span class="live" id="live"></span> 控制台 · 验证台</div>
+        <div class="ctrl">
+            <div class="brand">SENTINEL <b>relay</b></div>
+            <div class="field">
+                <label>当前会话 (C 位)</label>
+                <div class="sidbox empty" id="sid">— 暂无，点「新建会话」或等待默认会话 —</div>
+            </div>
+            <button class="btn teal" id="newBtn">＋ 新建会话</button>
+            <div class="field">
+                <label>切换 mode（哨兵在不在场）</label>
+                <div class="modes" id="modes">
+                    <button class="btn sel" data-mode="default">🛡 手动</button>
+                    <button class="btn" data-mode="plan">📋 只读</button>
+                    <button class="btn" data-mode="auto">⚡ 自动</button>
+                    <button class="btn" data-mode="yolo">🚀 YOLO</button>
+                </div>
+            </div>
+            <div class="field">
+                <label>遥控输入（发给 C 位）</label>
+                <textarea class="inp" id="inp" placeholder="例：运行 echo HELLO 并告诉我输出&#10;或 /status"></textarea>
+            </div>
+            <div class="row">
+                <button class="btn teal" id="sendBtn">发送 ↑</button>
+                <button class="btn" id="stopBtn">停</button>
+            </div>
+            <div class="note">这是开发验证台：连 <code>ws://localhost:7331/ws</code>，把中继桥接过来的 Kimi 流实时渲染出来。批准卡可点。Phase 2 由 Flutter 替换。</div>
+        </div>
+    </div>
+
+    <!-- 流列 -->
+    <div class="col">
+        <div class="col-h"><span class="live on" style="background:var(--teal);animation:none"></span> 活的流 · C 位会话</div>
+        <div class="stream" id="stream">
+            <div class="empty-stream" id="emptyStream">等待会话建立…<br>连上中继后，这里会逐字滚出 agent 的思考、回复、工具调用，<br>以及浮在流里的批准卡。</div>
+        </div>
+    </div>
+
+    <!-- 协议日志列 -->
+    <div class="col">
+        <div class="col-h"><span class="live" style="background:var(--sky);animation:none"></span> 协议日志 · envelope</div>
+        <div class="log" id="log"></div>
+    </div>
+
+</div>
+
+<script>
+    (function(){
+        "use strict";
+        var $=function(s){return document.querySelector(s);};
+        var sid=null;            // 当前 C 位 sid
+        var ws=null;
+        var streams={};          // sid -> {thought, reply, tools:{id->el}}  渲染句柄
+        var permCards={};        // permissionId(string) -> el
+
+        function logLine(dir, type, raw){
+            var el=document.createElement('div');
+            el.className='ln '+(dir==='up'?'up':(type==='relay.error'?'err':''));
+            var t=new Date().toLocaleTimeString('en-GB');
+            el.innerHTML='<span class="t">'+t+'</span> '+(dir==='up'?'↑':'↓')+' <b style="color:var(--dim)">'+esc(type)+'</b> '+esc(raw&&raw.length>140?raw.slice(0,140)+'…':raw);
+            var L=$('#log'); L.appendChild(el); L.scrollTop=L.scrollHeight;
+        }
+        function esc(s){return String(s).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});}
+
+        function setSid(s){
+            sid=s;
+            var box=$('#sid');
+            if(s){ box.textContent=s; box.classList.remove('empty'); }
+            else { box.textContent='— 暂无 —'; box.classList.add('empty'); }
+        }
+
+        function ensureStream(s){
+            if(streams[s]) return streams[s];
+            $('#emptyStream')&&$('#emptyStream').remove();
+            var wrap=document.createElement('div'); wrap.className='flow-wrap'; wrap.dataset.sid=s;
+            $('#stream').appendChild(wrap);
+            streams[s]={wrap:wrap, thought:null, reply:null, tools:{}};
+            return streams[s];
+        }
+        function activeStream(){ return sid?ensureStream(sid):null; }
+
+        function addThought(st){
+            var d=document.createElement('div'); d.className='blk thought';
+            d.innerHTML='<div class="th"><span class="ti">▸</span> 思考中…</div><div class="tb"><div><p></p></div></div>';
+            d.querySelector('.th').onclick=function(){d.classList.toggle('open');};
+            st.wrap.appendChild(d); st.thought=d; st.reply=null;
+            scrollStream();
+        }
+        function addReply(st){
+            var d=document.createElement('div'); d.className='blk reply';
+            st.wrap.appendChild(d); st.reply=d; st.thought=null;
+            scrollStream();
+        }
+        function appendText(st, kind, text){
+            if(kind==='thought'){
+                if(!st.thought) addThought(st);
+                st.thought.querySelector('p').textContent+=text;
+            } else {
+                if(!st.reply) addReply(st);
+                st.reply.textContent+=text;
+            }
+            scrollStream();
+        }
+        function addTool(st, id, title){
+            var d=document.createElement('div'); d.className='blk tool'; d.dataset.id=id;
+            d.innerHTML='<div class="tt">▣ '+esc(title||'tool')+'<span class="st">pending</span></div>';
+            st.wrap.appendChild(d); st.tools[id]=d; scrollStream();
+        }
+        function updateTool(st, id, status, contentText, rawOutput){
+            var d=st.tools[id]; if(!d) return;
+            d.classList.remove('done','failed');
+            if(status==='completed') d.classList.add('done');
+            if(status==='failed') d.classList.add('failed');
+            var stEl=d.querySelector('.st'); if(stEl) stEl.textContent=status||'';
+            if(contentText && !d.querySelector('.tc')){
+                var c=document.createElement('div'); c.className='tc'; d.appendChild(c);
+            }
+            if(contentText){ var c=d.querySelector('.tc'); if(c) c.textContent=contentText; }
+            if(status==='completed'||status==='failed'){
+                var o=document.createElement('div'); o.className='to';
+                o.textContent=(status==='failed'?'✗ ':'✓ ')+(rawOutput||''); d.appendChild(o);
+            }
+            scrollStream();
+        }
+        function scrollStream(){ var s=$('#stream'); s.scrollTop=s.scrollHeight; }
+
+        function addPerm(env){
+            var pl=env.payload, pid=String(env.permissionIdRaw);
+            var d=document.createElement('div'); d.className='blk perm'; d.dataset.pid=pid;
+            var opts=pl.options||[];
+            var title=(pl.toolCall&&pl.toolCall.title)||'tool';
+            var cmdText='';
+            try{ // 尝试从 toolCall.content 拼出命令文本
+                (pl.toolCall&&pl.toolCall.content||[]).forEach(function(c){
+                    if(c.content&&c.content.text) cmdText+=c.content.text;
+                });
+            }catch(e){}
+            var btns='';
+            opts.forEach(function(o){
+                var cls = o.kind==='reject_once'?'btn no':(o.kind==='allow_always'?'btn':'btn ok');
+                var label = o.kind==='reject_once'?'拒绝':(o.kind==='allow_always'?'本会话都批准':'批准');
+                btns+='<button class="'+cls+'" data-opt="'+esc(o.optionId)+'">'+label+'</button>';
+            });
+            d.innerHTML='<div class="ph"><div class="pi">▣</div><div class="pt">'+esc(title)+'</div><div class="pw">等你拍板</div></div>'+
+                (cmdText?'<div class="pcmd">'+esc(cmdText)+'</div>':'')+
+                '<div class="pact">'+btns+'</div>';
+            d.querySelectorAll('[data-opt]').forEach(function(b){
+                b.onclick=function(){
+                    send('permission.decision', env.sessionId, {permissionId:env.permissionIdRaw, optionId:b.getAttribute('data-opt')});
+                    d.classList.add('resolved');
+                    d.querySelector('.pw').textContent='已回应';
+                    d.querySelectorAll('button').forEach(function(x){x.disabled=true;x.style.opacity=.5;});
+                };
+            });
+            $('#stream').appendChild(d); permCards[pid]=d; scrollStream();
+        }
+
+        function send(type, sessionId, payload){
+            if(!ws||ws.readyState!==1) return;
+            var env={type:type}; if(sessionId) env.sessionId=sessionId; if(payload) env.payload=payload;
+            ws.send(JSON.stringify(env));
+            logLine('up', type, JSON.stringify(payload||{}));
+        }
+
+        function handle(env){
+            logLine('down', env.type, env.payload?JSON.stringify(env.payload):'');
+            switch(env.type){
+                case 'session.created':
+                    if(!sid) setSid(env.sessionId);
+                    ensureStream(env.sessionId);
+                    // 更新 mode 选中态
+                    try{
+                        var co=env.payload.configOptions||[];
+                        co.forEach(function(c){ if(c.id==='mode') highlightMode(c.currentValue); });
+                    }catch(e){}
+                    break;
+                case 'session.update':
+                    renderUpdate(env.sessionId, env.payload);
+                    break;
+                case 'permission.request':
+                    env.permissionIdRaw=env.payload.permissionId; // 保留原始类型
+                    addPerm(env);
+                    break;
+                case 'relay.error':
+                    var e=document.createElement('div'); e.className='blk reply'; e.style.color='var(--coral)';
+                    e.textContent='⚠ '+((env.payload&&env.payload.message)||'error'); $('#stream').appendChild(e); scrollStream();
+                    break;
+            }
+        }
+
+        function renderUpdate(s, update){
+            var st=ensureStream(s);
+            switch(update.sessionUpdate){
+                case 'agent_thought_chunk': appendText(st,'thought',update.content&&update.content.text||''); break;
+                case 'agent_message_chunk': appendText(st,'reply',update.content&&update.content.text||''); break;
+                case 'tool_call': addTool(st, update.toolCallId, update.title); break;
+                case 'tool_call_update':
+                    var txt=''; try{(update.content||[]).forEach(function(c){if(c.content&&c.content.text)txt+=c.content.text;});}catch(e){}
+                    updateTool(st, update.toolCallId, update.status, txt, update.rawOutput);
+                    break;
+                case 'config_option_update':
+                    (update.configOptions||[]).forEach(function(c){ if(c.id==='mode') highlightMode(c.currentValue); });
+                    break;
+            }
+        }
+        function highlightMode(v){
+            document.querySelectorAll('#modes .btn').forEach(function(b){ b.classList.toggle('sel', b.getAttribute('data-mode')===v); });
+        }
+
+        function connect(){
+            ws=new WebSocket('ws://'+location.hostname+':7331/ws');
+            ws.onopen=function(){ $('#live').classList.add('on'); };
+            ws.onclose=function(){ $('#live').classList.remove('on'); setTimeout(connect,1500); };
+            ws.onmessage=function(ev){ try{ handle(JSON.parse(ev.data)); }catch(e){} };
+        }
+
+// 控件事件
+        $('#newBtn').onclick=function(){ send('new_session', null, {}); };
+        $('#sendBtn').onclick=function(){ var t=$('#inp').value.trim(); if(!t||!sid) return; send('prompt', sid, {text:t}); $('#inp').value=''; };
+        $('#stopBtn').onclick=function(){ if(sid) send('cancel', sid, {}); };
+        $('#inp').addEventListener('keydown',function(e){ if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){ $('#sendBtn').click(); } });
+        document.querySelectorAll('#modes .btn').forEach(function(b){
+            b.onclick=function(){ if(sid) send('set_mode', sid, {modeId:b.getAttribute('data-mode')}); };
+        });
+
+        connect();
+    })();
+</script>
+</body>
+</html>
