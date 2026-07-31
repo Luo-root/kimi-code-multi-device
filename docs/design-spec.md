@@ -149,6 +149,7 @@ agent 不该在需要你时傻等，也不该擅自做危险决定。三类时�
 | 原生配置命令 mcp-config / update-config / sub-skill          | available_commands         | v2 配置写走原生命令       |
 | session/set_mode 用 modeId（非 mode）；set_config_option 用 configId+value | setmode 探针：modeId 报错→改后 OK，config_option_update 回推 | 会话头切 mode/model 的精确参数 |
 | slash 命令 = session/prompt 发 `/xxx` 文本，输出走 message_chunk | slash 探针：/status 返回结构化状态 | 中继无需为 slash 特殊处理 |
+| session/resume 需 {sessionId, cwd}；恢复上下文但不重放历史 update | resume 探针 | 中继须自缓存流尾部补发；重试拉起用 resume 恢复上下文 |
 
 ---
 
@@ -191,7 +192,7 @@ agent 不该在需要你时傻等，也不该擅自做危险决定。三类时�
 | ③ 许可裁决器  | 收到 permission → 查该 sid 的 mode 策略 → manual：转端等回应 + **超时默认拒绝**；yolo/auto：自动回 allow_once；plan：不应有工具调用，出现即记异常 |
 | ④ 多端广播器  | state 变化 → 推给所有连着的端（v1 只有手机，但按多端写）     |
 | ⑤ 状态持久化  | state 落盘，中继重启 / 端重连能续上，不丢"它正等你批准"      |
-| ⑥ 心跳 / 在线 | 检测 kimi 进程活没活、电脑睡没睡 → 维护三态                  |
+| ⑥ 心跳 / 在线 | 检测 kimi 进程活没活、电脑睡没睡 → 维护三态。kimi 子进程退出由 generation 计数判定"非预期"，触发广播 relay.state=degraded + permission.invalidate；上行 restart_kimi 触发 Restart + initialize + 逐 sid session/resume{sessionId,cwd} |
 
 **两条核心数据流**：
 
@@ -522,6 +523,8 @@ agent 忙时又发一句 Kimi 怎么处理，v0 没测；v1 输入框始终可�
 | 7    | 🔴   | 单会话批卡是否真发生                                   | 备而不用，退化逐张卡                     |
 | 8    | 🔴   | agent 忙时插话语义                                     | 输入侧不加逻辑，靠「停」+ 重发           |
 | 9    | 🔴   | 单会话卡 S1 是否冻住全进程                             | 退到"一会话一 kimi 进程"                 |
+| 10   | ✅   | session/resume 参数与恢复语义（上下文恢复、不重放）    | 已证实可用，中继自缓存流尾部补发历史 update |
+| 11   | 🔴   | 中继自身重启的磁盘持久化（state 落盘 → 重启后续上）   | 后续实现，v1 中继重启即丢失待批准队列 |
 
 ---
 

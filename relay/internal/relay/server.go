@@ -14,7 +14,6 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Relay 把 Kimi（acp）与若干端（websocket）缝在一起，是"单一真相"的持有者。
 type Relay struct {
 	acp   *acp.Client
 	store *session.Store
@@ -26,14 +25,14 @@ type Relay struct {
 type client struct {
 	conn *websocket.Conn
 	send chan []byte
-	wmu  sync.Mutex // 单连接串行写
+	wmu  sync.Mutex
 }
 
 func New() *Relay {
 	return &Relay{store: session.New(), clients: map[*client]bool{}}
 }
 
-// Start 初始化 ACP 并建一个默认会话，方便连上来即可测试。
+// Start 初始化 ACP（带 OnExit）并建默认会话。
 func (r *Relay) Start() error {
 	if os.Getenv("KIMI_CODE_HOME") == "" {
 		log.Println("[relay] 警告：未设置 KIMI_CODE_HOME，可能 Authentication required")
@@ -41,6 +40,7 @@ func (r *Relay) Start() error {
 	ac, err := acp.New(acp.Handlers{
 		OnUpdate:     r.onUpdate,
 		OnPermission: r.onPermission,
+		OnExit:       r.onKimiExit,
 	})
 	if err != nil {
 		return err
@@ -69,7 +69,6 @@ func (r *Relay) Close() {
 	}
 }
 
-// newSession 建会话，存快照，广播 created。返回 sid。
 func (r *Relay) newSession(ctx context.Context, cwd string) (string, error) {
 	m, err := r.acp.Request(ctx, "session/new", map[string]any{
 		"cwd": cwd, "mcpServers": []any{},
@@ -82,7 +81,8 @@ func (r *Relay) newSession(ctx context.Context, cwd string) (string, error) {
 		ConfigOptions json.RawMessage `json:"configOptions"`
 	}
 	_ = json.Unmarshal(m.Result, &res)
-	r.store.Set(res.SessionID, res.ConfigOptions)
+	r.store.SetCWD(res.SessionID, cwd)
+	r.store.SetConfig(res.SessionID, res.ConfigOptions)
 	r.broadcast(Env{
 		Type:      DownSessionCreated,
 		SessionID: res.SessionID,
@@ -91,7 +91,6 @@ func (r *Relay) newSession(ctx context.Context, cwd string) (string, error) {
 	return res.SessionID, nil
 }
 
-// onUpdate 透传流，并旁路记录 config 快照（供新连接补发）。
 func (r *Relay) onUpdate(sid string, update json.RawMessage) {
 	var probe struct {
 		SessionUpdate string          `json:"sessionUpdate"`
@@ -99,12 +98,12 @@ func (r *Relay) onUpdate(sid string, update json.RawMessage) {
 	}
 	_ = json.Unmarshal(update, &probe)
 	if probe.SessionUpdate == "config_option_update" && len(probe.ConfigOptions) > 0 {
-		r.store.Set(sid, probe.ConfigOptions)
+		r.store.SetConfig(sid, probe.ConfigOptions)
 	}
+	r.store.AppendUpdate(sid, update) // 进环形缓冲，供重连/恢复补发
 	r.broadcast(Env{Type: DownSessionUpdate, SessionID: sid, Payload: update})
 }
 
-// onPermission 把 Kimi 的许可请求转成端能渲染的卡，permissionId 透传 Kimi 的 id。
 func (r *Relay) onPermission(sid string, id json.RawMessage, params json.RawMessage) {
 	var p struct {
 		ToolCall json.RawMessage `json:"toolCall"`
@@ -120,6 +119,51 @@ func (r *Relay) onPermission(sid string, id json.RawMessage, params json.RawMess
 	})
 }
 
+// onKimiExit kimi 非预期退出：广播 degraded + 作废所有待批准。
+func (r *Relay) onKimiExit() {
+	log.Println("[relay] kimi 子进程退出（非预期）→ degraded")
+	r.broadcast(Env{Type: DownPermInvalidate})
+	r.broadcast(Env{Type: DownRelayState, Payload: mustJSON(DownRelayStatePayload{State: "degraded"})})
+}
+
+// restartKimi 重新拉起 kimi：Restart + initialize + 逐 sid resume 恢复上下文。
+func (r *Relay) restartKimi() {
+	log.Println("[relay] 重试拉起 kimi …")
+	if err := r.acp.Restart(); err != nil {
+		r.sendErr("", "restart spawn: "+err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := r.acp.Request(ctx, "initialize", map[string]any{
+		"protocolVersion":    1,
+		"clientCapabilities": map[string]any{},
+		"clientInfo":         map[string]any{"name": "sentinel-relay", "version": "0.1"},
+	}); err != nil {
+		r.sendErr("", "restart initialize: "+err.Error())
+		return
+	}
+	// 逐 sid resume（带 cwd），恢复 Kimi 侧上下文
+	for _, sid := range r.store.SIDs() {
+		cwd := r.store.CWD(sid)
+		m, err := r.acp.Request(ctx, "session/resume", map[string]any{"sessionId": sid, "cwd": cwd})
+		if err != nil {
+			log.Printf("[relay] resume %s 失败: %v", sid, err)
+			r.sendErr(sid, "会话恢复失败，上下文可能丢失: "+err.Error())
+			continue
+		}
+		var res struct {
+			ConfigOptions json.RawMessage `json:"configOptions"`
+		}
+		_ = json.Unmarshal(m.Result, &res)
+		if len(res.ConfigOptions) > 0 {
+			r.store.SetConfig(sid, res.ConfigOptions)
+		}
+	}
+	r.broadcast(Env{Type: DownRelayState, Payload: mustJSON(DownRelayStatePayload{State: "ok"})})
+	log.Println("[relay] kimi 已恢复 → ok")
+}
+
 func (r *Relay) broadcast(e Env) {
 	b, err := json.Marshal(e)
 	if err != nil {
@@ -130,20 +174,24 @@ func (r *Relay) broadcast(e Env) {
 	for c := range r.clients {
 		select {
 		case c.send <- b:
-		default: // 端太慢，丢这一帧并记日志；生产可改为断开慢端
+		default:
 			log.Printf("[relay] 端发送缓冲满，丢帧 type=%s", e.Type)
 		}
 	}
+}
+
+// sendBlocking 阻塞写，供 snapshot 用（历史不丢帧）。
+func (r *Relay) sendBlocking(c *client, e Env) {
+	b, _ := json.Marshal(e)
+	c.send <- b
 }
 
 func (r *Relay) sendErr(sid, msg string) {
 	r.broadcast(Env{Type: DownRelayError, SessionID: sid, Payload: mustJSON(DownRelayErrorPayload{Message: msg})})
 }
 
-// ---- websocket ----
-
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true }, // 本地开发用
+	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
 func (r *Relay) HandleWS(w http.ResponseWriter, req *http.Request) {
@@ -151,13 +199,13 @@ func (r *Relay) HandleWS(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		return
 	}
-	c := &client{conn: conn, send: make(chan []byte, 64)}
+	c := &client{conn: conn, send: make(chan []byte, 512)}
 	r.mu.Lock()
 	r.clients[c] = true
 	r.mu.Unlock()
 
 	go r.writePump(c)
-	r.readPump(c) // 在当前 goroutine 读，连接断开后清理
+	r.readPump(c)
 }
 
 func (r *Relay) writePump(c *client) {
@@ -176,10 +224,10 @@ func (r *Relay) writePump(c *client) {
 
 func (r *Relay) readPump(c *client) {
 	defer func() {
-		close(c.send) // 触发 writePump 退出 + 移除
+		close(c.send)
 		_ = c.conn.Close()
 	}()
-	r.snapshot(c) // 补发当前所有会话状态
+	r.snapshot(c)
 	for {
 		_, data, err := c.conn.ReadMessage()
 		if err != nil {
@@ -189,24 +237,22 @@ func (r *Relay) readPump(c *client) {
 	}
 }
 
-// snapshot 让新连上来的端立刻看到"现在有哪些会话、各自什么配置"。
+// snapshot 补发当前所有会话：created（含 config）+ 流尾部（历史）。阻塞写不丢帧。
 func (r *Relay) snapshot(c *client) {
-	for sid, opts := range r.store.Snapshot() {
-		b, _ := json.Marshal(Env{
+	for _, sid := range r.store.SIDs() {
+		opts := r.store.Snapshot()[sid]
+		r.sendBlocking(c, Env{
 			Type:      DownSessionCreated,
 			SessionID: sid,
 			Payload:   mustJSON(DownSessionCreatedPayload{ConfigOptions: opts}),
 		})
-		select {
-		case c.send <- b:
-		default:
+		for _, u := range r.store.Tail(sid) {
+			r.sendBlocking(c, Env{Type: DownSessionUpdate, SessionID: sid, Payload: u})
 		}
 	}
 }
 
-// handleUp 分发上行意图。
-// 并发关键：凡是会阻塞等 Kimi 的（Request），一律丢进 goroutine，绝不阻塞读循环；
-// 否则 permission 决策上行会被堵死，造成"中继等端、端等中继"的死锁。
+// handleUp 分发上行。并发关键：会阻塞等 Kimi 的一律丢 goroutine。
 func (r *Relay) handleUp(c *client, data []byte) {
 	var e Env
 	if err := json.Unmarshal(data, &e); err != nil {
@@ -214,7 +260,6 @@ func (r *Relay) handleUp(c *client, data []byte) {
 	}
 	switch e.Type {
 	case UpPermDecision:
-		// Respond 只写 stdin，不阻塞，可同步。
 		var d UpPermDecisionPayload
 		_ = json.Unmarshal(e.Payload, &d)
 		if err := r.acp.Respond(d.PermissionID, map[string]any{
@@ -277,6 +322,10 @@ func (r *Relay) handleUp(c *client, data []byte) {
 				r.sendErr("", "new_session: "+err.Error())
 			}
 		}()
+	case UpRestartKimi:
+		go r.restartKimi()
+	case UpDebugKill:
+		r.acp.DebugKill() // 仅开发期：模拟崩溃
 	}
 }
 
