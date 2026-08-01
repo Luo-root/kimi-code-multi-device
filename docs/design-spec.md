@@ -209,6 +209,13 @@ agent 不该在需要你时傻等，也不该擅自做危险决定。三类时�
 > **流 B · 遥控**
 > 端输入框 ──意图(prompt)──► 中继 ──`session/prompt(sid,text)`──► kimi；kimi ──`session/update(thought/message/tool_call…)`──► 中继广播。端点「停」──意图(cancel)──► 中继 ──`session/cancel(sid)`──► kimi。
 
+**Flutter 端流式累积状态机**
+
+端收到中继广播的 chunk 后，按以下规则累积成可渲染的流块：
+- **thought / message**：按"末尾块同类则追加、异类则新建"——连续 thought chunk 追加到同一块，遇到 message chunk 则新建 message 块；
+- **tool 调用**：按 `toolCallId` 配对 update，pending → in_progress（流式拼命令）→ permission → completed/failed；
+- **用户消息**：由端**乐观追加**（输入框发送后立即在本地流尾插入用户块），Kimi update 流**不回显用户消息**——避免双发或错位。
+
 **对外通道** ✅ *定稿*：
 
 - **数据通道**：Tailscale 虚拟 IP 上的 WebSocket，跨网络可用，内容点对点加密，契合原则 2。中继内部广播器不感知差异（本地 WS / 公网隧道只是两种接入）。
@@ -223,6 +230,16 @@ agent 不该在需要你时傻等，也不该擅自做危险决定。三类时�
 - **登录**：中继 spawn kimi acp 时复用 `KIMI_CODE_HOME` 的 device-code 登录态（一次性，人 + 浏览器 + 终端）。**手机端永不碰登录**。
 - **部署**：中继 = 电脑上的**常驻守护进程**（开机自启 / 崩溃自重启 kimi acp）。它挂 = 任务断，故自启与"崩溃后诚实告知端"是 v1 必做。
 
+**home_shell 接数据层**
+
+主屏各 UI 元素由以下数据驱动：
+- **三子胶囊（provider·model·思考）**：从 `configOptions` 读，provider 从 model value 前缀解析（`provider/model`），非独立维度；
+- **mode 图标菜单**：从 `configOptions` 读，只显图标、菜单看全称；
+- **抽屉会话列表**：`session/list` 驱动，按 `cwd` 分组 + 顶部搜索跨组过滤；
+- **slash 候选面板**：`available_commands_update` 驱动，输入 `/` 触发内联候选；
+- **底部批准浮层**：`pendingPermission` 驱动，会话级待批准队列；
+- **乐观更新**：端本地先 apply `setConfigOption`，消除"set → 等推送 → 闪回旧值"的延迟闪烁。
+
 ## §09 主屏形态（防坍缩的第一刀）
 
 > 这一章回答的不是"有哪些按钮"，是"打开 App 第一眼，它的气质像什么"。原则 5 立了"形态决定气质"，这里落地。
@@ -230,6 +247,8 @@ agent 不该在需要你时傻等，也不该擅自做危险决定。三类时�
 **第一眼：一条活的流，不是一个列表**
 
 打开 App，**主屏 = 此刻正在跑的那条会话的实时流**，像看一场直播。不是"会话列表，点进去才看得见"——那是待办软件的气质，会让产品坍缩。**列表退到配角**。只有没有任何活跃会话时，主屏才退成空态。
+
+**空状态**：用规范 7.1 点阵装饰，连接前文案"等待连接"，连接后无活跃会话文案"暂无活跃会话"。两态共用同一点阵骨架，仅文案切换。
 
 **这条流由什么组成（映射 v0 实测 update 类型）**：
 
@@ -469,7 +488,11 @@ agent 忙时又发一句 Kimi 怎么处理，v0 没测；v1 输入框始终可�
 
 **会话头：model + mode 选择器**
 
-每会话流顶一条细条：model 下拉 + mode 芯片。**provider 跟着 model 走**——model 名自带 provider 前缀（v0 实测 `myprovider/my-model`），选 model 即切 provider，**不独立切 provider**。mode 用图标 + 短文案表达哨兵在不在场（🛡手动 / 只读 / ⚡自动 / 🚀YOLO），必须一眼可见。下拉选项**从 configOptions 读**，不硬编码。
+每会话流顶一条细条：model 下拉 + mode 芯片。**provider 不是独立可设维度，是 model 的命名空间**——model value = `provider/model`（v0 实测 `myprovider/my-model`），选 model 即切 provider，**不独立切 provider**。mode 用图标 + 短文案表达哨兵在不在场（🛡手动 / 只读 / ⚡自动 / 🚀YOLO），必须一眼可见。下拉选项**从 configOptions 读**，不硬编码。
+
+**思考强度 effort**：档数随 provider/模型的 `support_efforts` 动态，UI 不写死。config 层为全局 `[thinking].effort`（文档证实），非会话级 `configOptions`。
+
+**effort 会话级 ACP 切法**：仍待探针确认。UI 占位受控态（下拉可选），但**不下发 ACP set**——确认不了则降级为只读展示，设置页标注"全局生效"。
 
 > **🔴 退路**：若 ACP set mode/model 不可用 → 退化为"新建会话时选、已建会话会话头只读可见当前值"。最差也只是"能看不能切"，透明性仍在。
 
@@ -579,6 +602,7 @@ agent 忙时又发一句 Kimi 怎么处理，v0 没测；v1 输入框始终可�
 | 13   | 🔴   | 下拉"黄色横杠"若净化后仍在                           | 定为 Lucide glyph 占位，换图标消除 |
 | 14   | 🔴   | 思考等级会话级 ACP 切法（非全局 config）             | 探针确认；确认不了则降级只读+跳设置 |
 | 15   | 🔴   | 附件上传 v1 范围（图片/文件/多选）                   | 待决；v1 占位诚实提示"暂不支持" |
+| 16   | 🔴   | Flutter↔中继 WS 连通（真机需局域网 IP + 防火墙放行 7331） | 开发期用 localhost，真机部署需确认网络可达 |
 
 ---
 

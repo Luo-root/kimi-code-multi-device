@@ -1,95 +1,73 @@
 import 'package:flutter/material.dart';
+import '../relay/models.dart';
+import '../relay/relay_client.dart';
+import '../relay/session_store.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
 import '../theme/app_dimens.dart';
 import '../theme/app_shadows.dart';
 import '../theme/app_icons.dart';
 import '../widgets/common.dart';
+import '../widgets/stream_block.dart';
 import 'design_showcase.dart';
 
-// ---------- 假数据：provider→model→effort 级联，演示"思考档数随模型动态" ----------
+// ---------- 常量 ----------
 
-class _ModelDef {
-  final String label;
-  final List<String> efforts; // effort id 列表，档数随模型变
-  const _ModelDef(this.label, this.efforts);
-}
+const _kDefaultRelayUrl = 'ws://127.0.0.1:7331/ws';
 
-class _ProviderDef {
-  final String id;
-  final String label;
-  final Map<String, _ModelDef> models;
-  const _ProviderDef(this.id, this.label, this.models);
-}
+// chip = 你的自由文本常用语（点选即发）；slash = Kimi 命令（来自 available_commands）。
+const _chips = ['跑下测试', 'commit 一下', '解释刚干了啥'];
 
-const _providers = [
-  _ProviderDef('openai', 'OpenAI', {
-    'gpt-5': _ModelDef('GPT-5', ['low', 'medium', 'high']),
-    'gpt-5-mini': _ModelDef('GPT-5 Mini', ['low', 'medium']),
-  }),
-  _ProviderDef('myprovider', 'MyProvider', {
-    'my-model': _ModelDef('My Model', ['low', 'medium', 'high', 'xhigh']),
-  }),
-  _ProviderDef('anthropic', 'Anthropic', {
-    'claude': _ModelDef('Claude', ['low', 'medium', 'high']),
-  }),
+// 思考强度：会话级 ACP 切法待探针确认，此刀占位（受控本地态，不下发）。
+const _effortOpts = [
+  DropdownOption(id: 'low', label: '低'),
+  DropdownOption(id: 'medium', label: '中'),
+  DropdownOption(id: 'high', label: '高'),
 ];
+const _effortLabel = {'low': '低', 'medium': '中', 'high': '高'};
 
-const _effortLabel = {
-  'low': '低',
-  'medium': '中',
-  'high': '高',
-  'xhigh': '超高',
-  'max': '极强',
-};
-
-const _modeOptions = [
-  DropdownOption(id: 'default', label: '手动审批', icon: AppIcons.modeManual,
-      subtitle: '危险动作逐一问你'),
-  DropdownOption(id: 'plan', label: '只读规划', icon: AppIcons.modePlan,
-      subtitle: '只规划，不执行工具'),
-  DropdownOption(id: 'auto', label: '自动', icon: AppIcons.modeAuto,
-      subtitle: 'agent 自主决策'),
-  DropdownOption(id: 'yolo', label: 'YOLO', icon: AppIcons.modeYolo,
-      subtitle: '自动批准，但可能问你'),
-];
 const _modeIcon = {
   'default': AppIcons.modeManual,
   'plan': AppIcons.modePlan,
   'auto': AppIcons.modeAuto,
   'yolo': AppIcons.modeYolo,
 };
+const _modeFallbackDesc = {
+  'default': '危险动作逐一问你',
+  'plan': '只规划，不执行工具',
+  'auto': 'agent 自主决策',
+  'yolo': '自动批准，但可能问你',
+};
 
-class _Sess {
-  final String id;
-  final String title;
-  const _Sess(this.id, this.title);
+// ---------- configOptions 解析（展示层，纯函数）----------
+
+String _provOf(String v) {
+  final i = v.indexOf('/');
+  return i < 0 ? v : v.substring(0, i);
 }
 
-class _Ws {
-  final String name;
-  final List<_Sess> sessions;
-  const _Ws(this.name, this.sessions);
+List<Map<String, dynamic>> _cfgList(dynamic cfg, String id) {
+  if (cfg is! List) return const [];
+  for (final c in cfg) {
+    if (c is Map && c['id'] == id) {
+      final o = c['options'];
+      if (o is List) {
+        return o
+            .map((e) => (e as Map).cast<String, dynamic>())
+            .toList();
+      }
+    }
+  }
+  return const [];
 }
 
-const _workspaces = [
-  _Ws('kimi-code-multi-device', [
-    _Sess('s1', '重构 payment'),
-    _Sess('s2', '运行 echo HI'),
-    _Sess('s3', '请记住数字 42'),
-  ]),
-  _Ws('v0probe', [
-    _Sess('s4', '运行 sleep 3 && echo DONE_B'),
-    _Sess('s5', '请运行 echo PROBE_HELLO'),
-  ]),
-  _Ws('relay', [
-    _Sess('s6', '哈喽，你知道 DeepSeek 发了新模型吗'),
-    _Sess('s7', 'hello，你是什么模型呀'),
-  ]),
-];
-
-const _chips = ['跑下测试', 'commit 一下', '解释刚干了啥', '/status'];
-const _slash = ['/status', '/usage', '/compact', '/mcp', '/skill'];
+String _cfgCur(dynamic cfg, String id) {
+  if (cfg is! List) return '';
+  for (final c in cfg) {
+    if (c is Map && c['id'] == id) return c['currentValue']?.toString() ?? '';
+  }
+  return '';
+}
 
 // ---------- 主页 ----------
 
@@ -101,85 +79,96 @@ class HomeShell extends StatefulWidget {
 }
 
 class _HomeShellState extends State<HomeShell> {
-  // 级联选择
-  String _providerId = _providers.first.id;
-  late String _modelId = _providers.first.models.keys.first;
-  late String _effortId = _providers.first.models.values.first.efforts.first;
-  String _modeId = 'default';
-  String _currentId = 's1';
-
-  bool _pending = true;
-  bool _approved = false;
-  bool _highlight = false;
-
+  final _client = RelayClient();
+  final _store = SessionStore();
   final _inputCtrl = TextEditingController();
   final _scrollCtrl = ScrollController();
-  final List<String> _extra = [];
-  String? _slashQuery; // 输入处于 "/xxx" 命令词阶段时为 xxx，否则 null
 
-  _ProviderDef get _curProvider =>
-      _providers.firstWhere((p) => p.id == _providerId);
-  Map<String, _ModelDef> get _curModels => _curProvider.models;
-  _ModelDef get _curModel => _curModels[_modelId] ?? _curModels.values.first;
+  String _relayUrl = _kDefaultRelayUrl;
+  String _effortId = 'medium'; // 占位
+  String? _slashQuery;
+
+  bool get _online => _client.connected;
 
   @override
-  void dispose() {
-    _inputCtrl.dispose();
-    _scrollCtrl.dispose();
-    super.dispose();
+  void initState() {
+    super.initState();
+    _client.onMessage = _store.handle;
+    _client.onOpen = () => setState(() {});
+    _client.onClose = () => setState(() {});
+    _store.addListener(_onStore);
+    _connect(_relayUrl);
   }
 
-  void _onProvider(String id) => setState(() {
-        _providerId = id;
-        _modelId = _curProvider.models.keys.first;
-        _effortId = _curModel.efforts.first;
-      });
-
-  void _onModel(String id) => setState(() {
-        _modelId = id;
-        _effortId = _curModel.efforts.first;
-      });
-
-  void _onEffort(String id) => setState(() => _effortId = id);
-
-  void _focusSheet() {
-    setState(() => _highlight = true);
-    Future.delayed(const Duration(milliseconds: 650), () {
-      if (mounted) setState(() => _highlight = false);
-    });
-  }
-
-  void _decide(bool approve) => setState(() {
-        _approved = approve;
-        _pending = false;
-      });
-
-  void _send(String text) {
-    final t = text.trim();
-    if (t.isEmpty) return;
-    setState(() {
-      _extra.add(t);
-      _slashQuery = null;
-    });
-    _inputCtrl.clear();
+  void _onStore() {
+    setState(() {});
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollCtrl.hasClients) {
         _scrollCtrl.animateTo(
           _scrollCtrl.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 220),
+          duration: const Duration(milliseconds: 180),
           curve: Curves.easeOut,
         );
       }
     });
   }
 
-  // 输入变化：以 '/' 开头且无空格 = 命令词阶段，弹内联候选；否则收起。
+  Future<void> _connect(String url) async {
+    _relayUrl = url;
+    try {
+      await _client.connect(url);
+    } catch (_) {
+      setState(() {});
+    }
+  }
+
+  // ---- 顶栏选择回调：下发 + 乐观更新 ----
+
+  void _onProvider(String prov) {
+    final sid = _store.currentSid;
+    final cfg = _store.configOf(sid);
+    final models = _cfgList(cfg, 'model')
+        .where((o) => _provOf(o['value']?.toString() ?? '') == prov)
+        .toList();
+    if (models.isEmpty || sid == null) return;
+    final target = models.first['value']?.toString() ?? '';
+    _client.send('set_model', sid: sid, payload: {'value': target});
+    _store.applyConfigOption(sid, 'model', target);
+  }
+
+  void _onModel(String value) {
+    final sid = _store.currentSid;
+    if (sid == null) return;
+    _client.send('set_model', sid: sid, payload: {'value': value});
+    _store.applyConfigOption(sid, 'model', value);
+  }
+
+  void _onMode(String m) {
+    final sid = _store.currentSid;
+    if (sid == null) return;
+    _client.send('set_mode', sid: sid, payload: {'modeId': m});
+    _store.applyConfigOption(sid, 'mode', m);
+  }
+
+  void _onEffort(String e) => setState(() => _effortId = e); // 占位，不下发
+
+  // ---- 输入 / slash / 附件 ----
+
+  void _send(String text) {
+    final t = text.trim();
+    final sid = _store.currentSid;
+    if (t.isEmpty || sid == null || !_online) return;
+    _store.addUser(sid, t);
+    _client.send('prompt', sid: sid, payload: {'text': t});
+    _inputCtrl.clear();
+    setState(() => _slashQuery = null);
+  }
+
   void _onInputChanged(String v) {
     final q = (v.startsWith('/') && !v.contains(' ')) ? v.substring(1) : null;
     if (q != _slashQuery) setState(() => _slashQuery = q);
   }
 
-  // 选中 slash：填入输入框（带尾空格），不发送，光标置末，收起候选。
   void _pickSlash(String s) {
     setState(() {
       _inputCtrl.text = '$s ';
@@ -202,6 +191,24 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
+  // ---- 抽屉动作 ----
+
+  void _openHistory(SessionMeta m) {
+    _client.send('open_history',
+        sid: m.sessionId, payload: {'sessionId': m.sessionId, 'cwd': m.cwd});
+  }
+
+  void _newSession() => _client.send('new_session', payload: {});
+
+  void _decide(PermOption opt) {
+    final p = _store.pendingPermission;
+    if (p == null) return;
+    _client.send('permission.decision',
+        sid: p.sid,
+        payload: {'permissionId': p.permissionId, 'optionId': opt.optionId});
+    setState(() => _store.pendingPermission = null);
+  }
+
   void _openSettings() => showModalBottomSheet(
         context: context,
         isScrollControlled: true,
@@ -209,20 +216,51 @@ class _HomeShellState extends State<HomeShell> {
         shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
         ),
-        builder: (_) => const _SettingsSheet(),
+        builder: (_) => _SettingsSheet(
+          store: _store,
+          relayUrl: _relayUrl,
+          effortLabel: _effortLabel[_effortId] ?? _effortId,
+          onReconnect: (url) {
+            Navigator.of(context).pop();
+            _client.disconnect();
+            _connect(url);
+          },
+          onPalette: () {
+            Navigator.of(context).pop();
+            Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const DesignShowcase()),
+            );
+          },
+        ),
       );
 
   @override
+  void dispose() {
+    _client.disconnect();
+    _store.removeListener(_onStore);
+    _inputCtrl.dispose();
+    _scrollCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final sid = _store.currentSid;
+    final cfg = _store.configOf(sid);
+    final blocks = _store.blocksOf(sid);
+    final perm = _store.pendingPermission;
+
     final slashOpen = _slashQuery != null;
+    final cmds = _store.commandsOf(sid);
     final slashOpts = _slashQuery == null
         ? const <String>[]
-        : _slash
-            .where((s) =>
-                _slashQuery!.isEmpty ||
+        : cmds
+            .map((c) => '/${(c as Map)['name']}')
+            .where((s) => _slashQuery!.isEmpty ||
                 s.toLowerCase().contains(_slashQuery!.toLowerCase()))
             .toList();
-    final bottomPad = _pending ? 360.0 : (slashOpen ? 230.0 : 150.0);
+
+    final dockH = perm != null ? 360.0 : (slashOpen ? 230.0 : 150.0);
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -230,9 +268,15 @@ class _HomeShellState extends State<HomeShell> {
         width: 280,
         backgroundColor: AppColors.background,
         child: _SessionDrawer(
-          workspaces: _workspaces,
-          currentId: _currentId,
-          onSelect: (id) => setState(() => _currentId = id),
+          store: _store,
+          onPick: (m) {
+            Navigator.of(context).pop();
+            _openHistory(m);
+          },
+          onNew: () {
+            Navigator.of(context).pop();
+            _newSession();
+          },
           onOpenSettings: () {
             Navigator.of(context).pop();
             _openSettings();
@@ -244,14 +288,14 @@ class _HomeShellState extends State<HomeShell> {
         child: Column(
           children: [
             _TopBar(
-              providerId: _providerId,
-              onProvider: _onProvider,
-              modelId: _modelId,
-              onModel: _onModel,
+              cfg: cfg,
               effortId: _effortId,
+              online: _online,
+              relayState: _store.relayState,
+              onProvider: _onProvider,
+              onModel: _onModel,
               onEffort: _onEffort,
-              modeId: _modeId,
-              onMode: (m) => setState(() => _modeId = m),
+              onMode: _onMode,
               onPalette: () => Navigator.of(context).push(
                 MaterialPageRoute(builder: (_) => const DesignShowcase()),
               ),
@@ -260,21 +304,31 @@ class _HomeShellState extends State<HomeShell> {
               child: Stack(
                 clipBehavior: Clip.none,
                 children: [
-                  _Stream(
-                    scrollCtrl: _scrollCtrl,
-                    bottomPad: bottomPad,
-                    pending: _pending,
-                    approved: _approved,
-                    extra: _extra,
-                    onFocus: _focusSheet,
-                  ),
+                  blocks.isEmpty
+                      ? _EmptyState(online: _online)
+                      : ListView.builder(
+                          controller: _scrollCtrl,
+                          padding: EdgeInsets.fromLTRB(
+                              AppSpacing.pageMargin,
+                              8,
+                              AppSpacing.pageMargin,
+                              dockH),
+                          itemCount: blocks.length,
+                          itemBuilder: (_, i) => Padding(
+                            padding: EdgeInsets.only(
+                                bottom: i == blocks.length - 1
+                                    ? 0
+                                    : AppSpacing.lg),
+                            child: StreamBlockView(block: blocks[i]),
+                          ),
+                        ),
                   Positioned(
                     left: 0,
                     right: 0,
                     bottom: 0,
                     child: _BottomDock(
-                      pending: _pending,
-                      highlight: _highlight,
+                      enabled: _online && sid != null,
+                      pending: perm,
                       controller: _inputCtrl,
                       onSend: _send,
                       onChanged: _onInputChanged,
@@ -283,8 +337,7 @@ class _HomeShellState extends State<HomeShell> {
                       slashOpen: slashOpen && slashOpts.isNotEmpty,
                       slashOpts: slashOpts,
                       onPickSlash: _pickSlash,
-                      onApprove: () => _decide(true),
-                      onReject: () => _decide(false),
+                      onDecide: _decide,
                     ),
                   ),
                 ],
@@ -297,39 +350,49 @@ class _HomeShellState extends State<HomeShell> {
   }
 }
 
-// ---------- 顶部导航：左汉堡 / 中[provider·model·思考] / 右[三态灯·mode图标] ----------
+// ---------- 顶部导航 ----------
 
 class _TopBar extends StatelessWidget {
-  final String providerId;
-  final ValueChanged<String> onProvider;
-  final String modelId;
-  final ValueChanged<String> onModel;
+  final dynamic cfg;
   final String effortId;
+  final bool online;
+  final String relayState;
+  final ValueChanged<String> onProvider;
+  final ValueChanged<String> onModel;
   final ValueChanged<String> onEffort;
-  final String modeId;
   final ValueChanged<String> onMode;
   final VoidCallback onPalette;
 
   const _TopBar({
-    required this.providerId,
-    required this.onProvider,
-    required this.modelId,
-    required this.onModel,
+    required this.cfg,
     required this.effortId,
+    required this.online,
+    required this.relayState,
+    required this.onProvider,
+    required this.onModel,
     required this.onEffort,
-    required this.modeId,
     required this.onMode,
     required this.onPalette,
   });
 
   @override
   Widget build(BuildContext context) {
-    final prov = _providers.firstWhere((p) => p.id == providerId);
-    final models = prov.models;
-    final modelDef = models[modelId] ?? models.values.first;
-    final curModelId = models.containsKey(modelId) ? modelId : models.keys.first;
-    final curEffort =
-        modelDef.efforts.contains(effortId) ? effortId : modelDef.efforts.first;
+    final modelOpts = _cfgList(cfg, 'model');
+    final curModel = _cfgCur(cfg, 'model');
+    final providers =
+        modelOpts.map((o) => _provOf(o['value']?.toString() ?? '')).toSet().toList();
+    final curProv = _provOf(curModel);
+    final modelsOfProv = modelOpts
+        .where((o) => _provOf(o['value']?.toString() ?? '') == curProv)
+        .toList();
+    final curModelLabel = modelsOfProv
+            .firstWhere((o) => o['value'] == curModel,
+                orElse: () => <String, dynamic>{})
+            .let((m) => (m['name']?.toString() ?? curModel));
+
+    final dot = online
+        ? (relayState == 'degraded' ? AppColors.warning : AppColors.approve)
+        : AppColors.placeholder;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(8, 10, 8, 10),
@@ -338,42 +401,39 @@ class _TopBar extends StatelessWidget {
           _iconBtn(AppIcons.menu,
               onTap: () => Scaffold.of(context).openDrawer()),
           const SizedBox(width: 6),
-          // 中：三个子胶囊，等分可截断
           Expanded(
             child: Row(
               children: [
                 Flexible(
                   child: ChipDropdown(
-                    triggerLabel: prov.label,
-                    options: _providers
-                        .map((p) => DropdownOption(id: p.id, label: p.label))
+                    triggerLabel: providers.isEmpty ? '—' : curProv,
+                    options: providers
+                        .map((p) => DropdownOption(id: p, label: p))
                         .toList(),
-                    selectedId: providerId,
+                    selectedId: curProv,
                     onSelect: onProvider,
                   ),
                 ),
                 const SizedBox(width: 5),
                 Flexible(
                   child: ChipDropdown(
-                    triggerLabel: models[curModelId]!.label,
-                    options: models.entries
-                        .map((e) => DropdownOption(id: e.key, label: e.value.label))
+                    triggerLabel:
+                        modelsOfProv.isEmpty ? '—' : (curModelLabel.isEmpty ? '—' : curModelLabel),
+                    options: modelsOfProv
+                        .map((o) => DropdownOption(
+                            id: o['value']?.toString() ?? '',
+                            label: o['name']?.toString() ?? ''))
                         .toList(),
-                    selectedId: curModelId,
+                    selectedId: curModel,
                     onSelect: onModel,
                   ),
                 ),
                 const SizedBox(width: 5),
                 Flexible(
                   child: ChipDropdown(
-                    triggerLabel: _effortLabel[curEffort] ?? curEffort,
-                    options: modelDef.efforts
-                        .map((e) => DropdownOption(
-                              id: e,
-                              label: _effortLabel[e] ?? e,
-                            ))
-                        .toList(),
-                    selectedId: curEffort,
+                    triggerLabel: _effortLabel[effortId] ?? effortId,
+                    options: _effortOpts,
+                    selectedId: effortId,
                     onSelect: onEffort,
                   ),
                 ),
@@ -381,10 +441,13 @@ class _TopBar extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 6),
-          // 右：三态灯 + mode 图标菜单 + 调色板(开发期)
-          const BreathingDot(color: AppColors.approve),
+          Container(
+            width: 9,
+            height: 9,
+            decoration: BoxDecoration(color: dot, shape: BoxShape.circle),
+          ),
           const SizedBox(width: 10),
-          _ModeIconMenu(modeId: modeId, onMode: onMode),
+          _ModeIconMenu(cfg: cfg, onMode: onMode),
           const SizedBox(width: 4),
           _iconBtn(AppIcons.palette, onTap: onPalette),
         ],
@@ -404,12 +467,17 @@ class _TopBar extends StatelessWidget {
   }
 }
 
-// ---------- mode 图标触发菜单：常驻只显图标，点开看全称+描述 ----------
+/// 给 Map 加一个 let，方便链式取 name 兜底。
+extension _MapLet<K, V> on Map<K, V> {
+  R let<R>(R Function(Map<K, V>) f) => f(this);
+}
+
+// ---------- mode 图标菜单（真实 mode options）----------
 
 class _ModeIconMenu extends StatefulWidget {
-  final String modeId;
+  final dynamic cfg;
   final ValueChanged<String> onMode;
-  const _ModeIconMenu({required this.modeId, required this.onMode});
+  const _ModeIconMenu({required this.cfg, required this.onMode});
 
   @override
   State<_ModeIconMenu> createState() => _ModeIconMenuState();
@@ -422,9 +490,22 @@ class _ModeIconMenuState extends State<_ModeIconMenu> {
 
   void _toggle() => _open ? _close() : _openMenu();
 
+  List<Map<String, dynamic>> get _modes {
+    final real = _cfgList(widget.cfg, 'mode');
+    if (real.isNotEmpty) return real;
+    return _modeIcon.keys
+        .map((k) => <String, dynamic>{
+              'value': k,
+              'name': k,
+              'description': _modeFallbackDesc[k],
+            })
+        .toList();
+  }
+
   void _openMenu() {
     final box = context.findRenderObject() as RenderBox;
     final off = box.localToGlobal(Offset.zero);
+    final cur = _cfgCur(widget.cfg, 'mode');
     _entry = OverlayEntry(
       builder: (ctx) => Stack(
         children: [
@@ -449,14 +530,15 @@ class _ModeIconMenuState extends State<_ModeIconMenu> {
               padding: const EdgeInsets.symmetric(vertical: 8),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
-                children: _modeOptions
+                children: _modes
                     .map((m) => _MenuRow(
-                          icon: m.icon,
-                          label: m.label,
-                          subtitle: m.subtitle,
-                          selected: m.id == widget.modeId,
+                          icon: _modeIcon[m['value']] ?? AppIcons.modeManual,
+                          label: m['name']?.toString() ?? m['value']?.toString() ?? '',
+                          subtitle: m['description']?.toString() ??
+                              _modeFallbackDesc[m['value']],
+                          selected: m['value'] == cur,
                           onTap: () {
-                            widget.onMode(m.id);
+                            widget.onMode(m['value']?.toString() ?? '');
                             _close();
                           },
                         ))
@@ -485,7 +567,8 @@ class _ModeIconMenuState extends State<_ModeIconMenu> {
 
   @override
   Widget build(BuildContext context) {
-    final icon = _modeIcon[widget.modeId] ?? AppIcons.modeManual;
+    final cur = _cfgCur(widget.cfg, 'mode');
+    final icon = _modeIcon[cur] ?? AppIcons.modeManual;
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTapDown: (_) => setState(() => _down = true),
@@ -506,7 +589,6 @@ class _ModeIconMenuState extends State<_ModeIconMenu> {
   }
 }
 
-/// 菜单行：图标(灰) + 黑字 + 灰副标题 + 蓝勾。
 class _MenuRow extends StatefulWidget {
   final IconData? icon;
   final String label;
@@ -578,18 +660,18 @@ class _MenuRowState extends State<_MenuRow> {
   }
 }
 
-// ---------- 会话抽屉：新建 + 搜索 + 工作区分组 + 底部设置 ----------
+// ---------- 会话抽屉：真实 session.list + 搜索 + 工作区分组 ----------
 
 class _SessionDrawer extends StatefulWidget {
-  final List<_Ws> workspaces;
-  final String currentId;
-  final ValueChanged<String> onSelect;
+  final SessionStore store;
+  final ValueChanged<SessionMeta> onPick;
+  final VoidCallback onNew;
   final VoidCallback onOpenSettings;
   const _SessionDrawer({
     super.key,
-    required this.workspaces,
-    required this.currentId,
-    required this.onSelect,
+    required this.store,
+    required this.onPick,
+    required this.onNew,
     required this.onOpenSettings,
   });
 
@@ -600,20 +682,33 @@ class _SessionDrawer extends StatefulWidget {
 class _SessionDrawerState extends State<_SessionDrawer> {
   String _q = '';
 
-  bool _match(_Sess s) =>
-      _q.isEmpty || s.title.toLowerCase().contains(_q.toLowerCase());
+  String _groupKey(SessionMeta m) {
+    final parts = m.cwd.split('/').where((p) => p.isNotEmpty).toList();
+    return parts.length >= 2
+        ? '${parts[parts.length - 2]}/${parts.last}'
+        : (parts.isNotEmpty ? parts.last : '—');
+  }
+
+  bool _match(SessionMeta m) =>
+      _q.isEmpty || m.title.toLowerCase().contains(_q.toLowerCase());
 
   @override
   Widget build(BuildContext context) {
+    final all = widget.store.history.where(_match).toList();
+    final groups = <String, List<SessionMeta>>{};
+    for (final m in all) {
+      groups.putIfAbsent(_groupKey(m), () => []).add(m);
+    }
+    final cur = widget.store.currentSid;
+
     return SafeArea(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // 新建会话（淡化，无白卡无阴影）
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
             child: Pressable(
-              onTap: () => Navigator.of(context).pop(),
+              onTap: widget.onNew,
               child: Padding(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
@@ -638,7 +733,6 @@ class _SessionDrawerState extends State<_SessionDrawer> {
               ),
             ),
           ),
-          // 搜索框
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
             child: Container(
@@ -674,18 +768,15 @@ class _SessionDrawerState extends State<_SessionDrawer> {
             padding: EdgeInsets.fromLTRB(16, 8, 16, 8),
             child: Text('工作区', style: AppText.monoCaption),
           ),
-          // 工作区分组（按搜索过滤）
           Expanded(
-            child: ListView(
-              padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-              children: [
-                for (final ws in widget.workspaces)
-                  Builder(builder: (_) {
-                    final matched = ws.sessions.where(_match).toList();
-                    if (matched.isEmpty) return const SizedBox.shrink();
-                    return Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
+            child: groups.isEmpty
+                ? Center(
+                    child: Text('无匹配会话', style: AppText.caption),
+                  )
+                : ListView(
+                    padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                    children: [
+                      for (final entry in groups.entries) ...[
                         Padding(
                           padding: const EdgeInsets.fromLTRB(8, 10, 8, 4),
                           child: Row(
@@ -694,7 +785,7 @@ class _SessionDrawerState extends State<_SessionDrawer> {
                                   size: 15, color: AppColors.textSecondary),
                               const SizedBox(width: 8),
                               Expanded(
-                                child: Text(ws.name,
+                                child: Text(entry.key,
                                     style: AppText.callout.copyWith(
                                         fontWeight: FontWeight.w600),
                                     maxLines: 1,
@@ -703,14 +794,11 @@ class _SessionDrawerState extends State<_SessionDrawer> {
                             ],
                           ),
                         ),
-                        for (final s in matched) _sessionRow(context, s),
+                        for (final m in entry.value) _row(m, m.sessionId == cur),
                       ],
-                    );
-                  }),
-              ],
-            ),
+                    ],
+                  ),
           ),
-          // 底部设置入口
           Container(
             decoration: const BoxDecoration(
               border: Border(top: BorderSide(color: AppColors.hairline)),
@@ -736,13 +824,9 @@ class _SessionDrawerState extends State<_SessionDrawer> {
     );
   }
 
-  Widget _sessionRow(BuildContext context, _Sess s) {
-    final sel = s.id == widget.currentId;
+  Widget _row(SessionMeta m, bool sel) {
     return Pressable(
-      onTap: () {
-        widget.onSelect(s.id);
-        Navigator.of(context).pop();
-      },
+      onTap: () => widget.onPick(m),
       child: Container(
         margin: const EdgeInsets.symmetric(vertical: 2),
         decoration: BoxDecoration(
@@ -764,13 +848,15 @@ class _SessionDrawerState extends State<_SessionDrawer> {
               Expanded(
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(12, 9, 12, 9),
-                  child: Text(s.title,
-                      style: AppText.callout.copyWith(
-                        color: AppColors.textPrimary,
-                        fontWeight: sel ? FontWeight.w600 : FontWeight.w400,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis),
+                  child: Text(
+                    m.title.isEmpty ? '（无标题）' : m.title,
+                    style: AppText.callout.copyWith(
+                      color: AppColors.textPrimary,
+                      fontWeight: sel ? FontWeight.w600 : FontWeight.w400,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
               ),
             ],
@@ -781,322 +867,68 @@ class _SessionDrawerState extends State<_SessionDrawer> {
   }
 }
 
-// ---------- 活的流 ----------
+// ---------- 空状态：点阵装饰（规范 7.1）----------
 
-class _Stream extends StatelessWidget {
-  final ScrollController scrollCtrl;
-  final double bottomPad;
-  final bool pending;
-  final bool approved;
-  final List<String> extra;
-  final VoidCallback onFocus;
-
-  const _Stream({
-    required this.scrollCtrl,
-    required this.bottomPad,
-    required this.pending,
-    required this.approved,
-    required this.extra,
-    required this.onFocus,
-  });
+class _EmptyState extends StatelessWidget {
+  final bool online;
+  const _EmptyState({required this.online});
 
   @override
   Widget build(BuildContext context) {
-    return ListView(
-      controller: scrollCtrl,
-      padding: EdgeInsets.fromLTRB(
-          AppSpacing.pageMargin, 8, AppSpacing.pageMargin, bottomPad),
-      children: [
-        const _UserBubble('运行 echo SENTINEL 并告诉我输出'),
-        const SizedBox(height: AppSpacing.lg),
-        const _ThinkingBlock('用户想运行 echo，这是个无害操作，直接执行并返回输出即可…'),
-        const SizedBox(height: AppSpacing.lg),
-        const _ToolCardDone(
-            title: 'Bash', command: 'echo SENTINEL', output: 'SENTINEL', ok: true),
-        const SizedBox(height: AppSpacing.lg),
-        const _ReplyText('命令输出为：`SENTINEL`'),
-        const SizedBox(height: AppSpacing.lg),
-        const _UserBubble('再清理一下 build 目录'),
-        const SizedBox(height: AppSpacing.lg),
-        const _ThinkingBlock('要删除 build 目录，这是不可逆操作，必须先取得用户许可…'),
-        const SizedBox(height: AppSpacing.lg),
-        if (pending)
-          _ApprovalAnchor(
-              command: 'rm -rf build/ && npm run deploy', onTap: onFocus)
-        else
-          _ToolCardDone(
-              title: 'Bash',
-              command: 'rm -rf build/ && npm run deploy',
-              output: approved ? 'build cleaned, deployed to prod' : '已拒绝',
-              ok: approved),
-        for (final m in extra) ...[
-          const SizedBox(height: AppSpacing.lg),
-          _UserBubble(m),
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const _DotMatrix(),
+          const SizedBox(height: AppSpacing.xl),
+          Text(
+            online ? '尽管问，Kimi 在听' : '连接中继后开始',
+            style: AppText.body.copyWith(color: AppColors.textSecondary),
+          ),
         ],
-      ],
-    );
-  }
-}
-
-class _UserBubble extends StatelessWidget {
-  final String text;
-  const _UserBubble(this.text);
-  @override
-  Widget build(BuildContext context) {
-    return Align(
-      alignment: Alignment.centerRight,
-      child: Container(
-        constraints: const BoxConstraints(maxWidth: 260),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          color: AppColors.accentSoft,
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: Text(text, style: AppText.body),
       ),
     );
   }
 }
 
-class _ReplyText extends StatelessWidget {
-  final String text;
-  const _ReplyText(this.text);
-  @override
-  Widget build(BuildContext context) => Text(text, style: AppText.body);
-}
+class _DotMatrix extends StatelessWidget {
+  const _DotMatrix();
+  static const double _dot = 6;
+  static const double _gap = 5;
 
-class _ThinkingBlock extends StatefulWidget {
-  final String text;
-  const _ThinkingBlock(this.text);
-  @override
-  State<_ThinkingBlock> createState() => _ThinkingBlockState();
-}
-
-class _ThinkingBlockState extends State<_ThinkingBlock> {
-  bool _open = false;
   @override
   Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: AppColors.thinkSoft,
-        borderRadius: BorderRadius.circular(AppRadius.thumbnail),
-      ),
-      child: AnimatedSize(
-        duration: const Duration(milliseconds: 200),
-        curve: Curves.easeOut,
-        alignment: Alignment.topCenter,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Pressable(
-              onTap: () => setState(() => _open = !_open),
-              child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                child: Row(
-                  children: [
-                    Icon(_open ? AppIcons.chevronDown : AppIcons.chevronRight,
-                        size: 14, color: AppColors.think),
-                    const SizedBox(width: 6),
-                    Text('思考',
-                        style: AppText.callout.copyWith(color: AppColors.think)),
-                  ],
-                ),
-              ),
-            ),
-            if (_open)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                child: Text(widget.text,
-                    style: AppText.callout.copyWith(
-                        color: AppColors.think, fontStyle: FontStyle.italic)),
-              ),
-          ],
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: List.generate(
+        4,
+        (b) => Padding(
+          padding: EdgeInsets.only(right: b < 3 ? 12 : 0),
+          child: _block(b),
         ),
       ),
     );
   }
-}
 
-class _ToolCardDone extends StatefulWidget {
-  final String title;
-  final String command;
-  final String output;
-  final bool ok;
-  const _ToolCardDone(
-      {required this.title,
-      required this.command,
-      required this.output,
-      required this.ok});
-  @override
-  State<_ToolCardDone> createState() => _ToolCardDoneState();
-}
-
-class _ToolCardDoneState extends State<_ToolCardDone> {
-  bool _open = false;
-  @override
-  Widget build(BuildContext context) {
-    final statusColor = widget.ok ? AppColors.approve : AppColors.reject;
-    return Container(
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(AppRadius.thumbnail),
-        boxShadow: AppShadows.card,
-      ),
-      child: IntrinsicHeight(
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Container(
-              width: 4,
-              decoration: BoxDecoration(
-                color: statusColor,
-                borderRadius: const BorderRadius.only(
-                  topLeft: Radius.circular(AppRadius.thumbnail),
-                  bottomLeft: Radius.circular(AppRadius.thumbnail),
-                ),
-              ),
-            ),
-            Expanded(
-              child: AnimatedSize(
-                duration: const Duration(milliseconds: 200),
-                curve: Curves.easeOut,
-                alignment: Alignment.topCenter,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Pressable(
-                      onTap: () => setState(() => _open = !_open),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 11),
-                        child: Row(
-                          children: [
-                            const Icon(AppIcons.terminal,
-                                size: 14, color: AppColors.textSecondary),
-                            const SizedBox(width: 8),
-                            Text(widget.title, style: AppText.mono),
-                            const Spacer(),
-                            Icon(widget.ok ? AppIcons.check : AppIcons.close,
-                                size: 13, color: statusColor),
-                            const SizedBox(width: 4),
-                            Text(widget.ok ? '完成' : '已拒绝',
-                                style: AppText.monoCaption
-                                    .copyWith(color: statusColor)),
-                            const SizedBox(width: 6),
-                            Icon(
-                                _open
-                                    ? AppIcons.chevronDown
-                                    : AppIcons.chevronRight,
-                                size: 13,
-                                color: AppColors.placeholder),
-                          ],
-                        ),
-                      ),
-                    ),
-                    if (_open) ...[
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-                        child: Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            color: AppColors.background,
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Text(widget.command, style: AppText.mono),
-                        ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                        child: Row(
-                          children: [
-                            Icon(
-                                widget.ok ? AppIcons.check : AppIcons.close,
-                                size: 12,
-                                color: statusColor),
-                            const SizedBox(width: 5),
-                            Expanded(
-                              child: Text(widget.output,
-                                  style: AppText.monoCaption
-                                      .copyWith(color: statusColor)),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _ApprovalAnchor extends StatelessWidget {
-  final String command;
-  final VoidCallback onTap;
-  const _ApprovalAnchor({required this.command, required this.onTap});
-  @override
-  Widget build(BuildContext context) {
-    return Pressable(
-      onTap: onTap,
-      child: Container(
-        decoration: BoxDecoration(
-          color: AppColors.surface,
-          borderRadius: BorderRadius.circular(AppRadius.thumbnail),
-          boxShadow: AppShadows.card,
-        ),
-        child: IntrinsicHeight(
+  Widget _block(int seed) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: List.generate(
+        3,
+        (r) => Padding(
+          padding: EdgeInsets.only(bottom: r < 2 ? _gap : 0),
           child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Container(
-                width: 4,
-                decoration: const BoxDecoration(
-                  color: AppColors.warning,
-                  borderRadius: BorderRadius.only(
-                    topLeft: Radius.circular(AppRadius.thumbnail),
-                    bottomLeft: Radius.circular(AppRadius.thumbnail),
-                  ),
-                ),
-              ),
-              Expanded(
-                child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-                  child: Row(
-                    children: [
-                      const Icon(AppIcons.terminal,
-                          size: 14, color: AppColors.warning),
-                      const SizedBox(width: 8),
-                      Expanded(
-                          child: Text(command,
-                              style: AppText.mono,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis)),
-                      const SizedBox(width: 8),
-                      Container(
-                        width: 7,
-                        height: 7,
-                        decoration: const BoxDecoration(
-                            color: AppColors.warning, shape: BoxShape.circle),
-                      ),
-                      const SizedBox(width: 5),
-                      Text('待批准',
-                          style: AppText.monoCaption
-                              .copyWith(color: AppColors.warning)),
-                      const SizedBox(width: 4),
-                      const Icon(AppIcons.chevronDown,
-                          size: 13, color: AppColors.warning),
-                    ],
-                  ),
-                ),
-              ),
-            ],
+            mainAxisSize: MainAxisSize.min,
+            children: List.generate(4, (c) {
+              final n = (seed * 13 + r * 7 + c * 5) % 10;
+              final color = n < 6 ? const Color(0xFFD4D6DA) : AppColors.dots[n - 5];
+              return Container(
+                width: _dot,
+                height: _dot,
+                margin: EdgeInsets.only(right: c < 3 ? _gap : 0),
+                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+              );
+            }),
           ),
         ),
       ),
@@ -1107,8 +939,8 @@ class _ApprovalAnchor extends StatelessWidget {
 // ---------- 底部 dock ----------
 
 class _BottomDock extends StatelessWidget {
-  final bool pending;
-  final bool highlight;
+  final bool enabled;
+  final PermissionRequest? pending;
   final TextEditingController controller;
   final ValueChanged<String> onSend;
   final ValueChanged<String> onChanged;
@@ -1117,12 +949,11 @@ class _BottomDock extends StatelessWidget {
   final bool slashOpen;
   final List<String> slashOpts;
   final ValueChanged<String> onPickSlash;
-  final VoidCallback onApprove;
-  final VoidCallback onReject;
+  final ValueChanged<PermOption> onDecide;
 
   const _BottomDock({
+    required this.enabled,
     required this.pending,
-    required this.highlight,
     required this.controller,
     required this.onSend,
     required this.onChanged,
@@ -1131,8 +962,7 @@ class _BottomDock extends StatelessWidget {
     required this.slashOpen,
     required this.slashOpts,
     required this.onPickSlash,
-    required this.onApprove,
-    required this.onReject,
+    required this.onDecide,
   });
 
   @override
@@ -1158,19 +988,14 @@ class _BottomDock extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (pending) ...[
+              if (pending != null) ...[
                 Padding(
                   padding: const EdgeInsets.symmetric(
                       horizontal: AppSpacing.pageMargin),
-                  child: _ApprovalSheet(
-                    highlight: highlight,
-                    onApprove: onApprove,
-                    onReject: onReject,
-                  ),
+                  child: _PermSheet(perm: pending!, onDecide: onDecide),
                 ),
                 const SizedBox(height: 8),
               ],
-              // 快捷回复 chip 行
               SizedBox(
                 height: 34,
                 child: ListView.separated(
@@ -1198,7 +1023,6 @@ class _BottomDock extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 8),
-              // slash 内联候选：紧贴输入框上方，不遮挡输入框，可继续编辑
               if (slashOpen)
                 Padding(
                   padding: const EdgeInsets.fromLTRB(
@@ -1209,6 +1033,7 @@ class _BottomDock extends StatelessWidget {
                 padding:
                     const EdgeInsets.symmetric(horizontal: AppSpacing.pageMargin),
                 child: _InputBar(
+                  enabled: enabled,
                   controller: controller,
                   onSend: onSend,
                   onChanged: onChanged,
@@ -1223,7 +1048,6 @@ class _BottomDock extends StatelessWidget {
   }
 }
 
-/// slash 候选面板：白卡浮层，按已输入的 '/' 后串过滤。
 class _SlashPanel extends StatelessWidget {
   final List<String> opts;
   final ValueChanged<String> onPick;
@@ -1268,11 +1092,13 @@ class _SlashPanel extends StatelessWidget {
 }
 
 class _InputBar extends StatelessWidget {
+  final bool enabled;
   final TextEditingController controller;
   final ValueChanged<String> onSend;
   final ValueChanged<String> onChanged;
   final VoidCallback onOpenPlus;
   const _InputBar({
+    required this.enabled,
     required this.controller,
     required this.onSend,
     required this.onChanged,
@@ -1289,7 +1115,6 @@ class _InputBar extends StatelessWidget {
       ),
       child: Row(
         children: [
-          // 左 + = 附件入口
           Pressable(
             onTap: onOpenPlus,
             child: Container(
@@ -1305,30 +1130,34 @@ class _InputBar extends StatelessWidget {
           Expanded(
             child: TextField(
               controller: controller,
+              enabled: enabled,
               style: AppText.body,
               maxLines: 1,
               textInputAction: TextInputAction.send,
               onChanged: onChanged,
               onSubmitted: onSend,
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 isCollapsed: true,
                 border: InputBorder.none,
-                hintText: '尽管问…',
+                hintText: enabled ? '尽管问…' : '先连接中继',
                 hintStyle: AppText.placeholder,
-                contentPadding: EdgeInsets.symmetric(vertical: 8),
+                contentPadding: const EdgeInsets.symmetric(vertical: 8),
               ),
             ),
           ),
           const SizedBox(width: AppSpacing.sm),
           Pressable(
-            onTap: () => onSend(controller.text),
+            onTap: enabled ? () => onSend(controller.text) : () {},
             child: Container(
               width: 32,
               height: 32,
-              decoration: const BoxDecoration(
-                  color: AppColors.textPrimary, shape: BoxShape.circle),
-              child:
-                  const Icon(AppIcons.send, size: 16, color: AppColors.surface),
+              decoration: BoxDecoration(
+                color: enabled ? AppColors.textPrimary : AppColors.keyCap,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(AppIcons.send,
+                  size: 16,
+                  color: enabled ? AppColors.surface : AppColors.placeholder),
             ),
           ),
         ],
@@ -1337,32 +1166,21 @@ class _InputBar extends StatelessWidget {
   }
 }
 
-class _ApprovalSheet extends StatefulWidget {
-  final bool highlight;
-  final VoidCallback onApprove;
-  final VoidCallback onReject;
-  const _ApprovalSheet({
-    required this.highlight,
-    required this.onApprove,
-    required this.onReject,
-  });
-  @override
-  State<_ApprovalSheet> createState() => _ApprovalSheetState();
-}
+// ---------- 批准浮层（真实 permission）----------
 
-class _ApprovalSheetState extends State<_ApprovalSheet> {
-  bool _open = false;
+class _PermSheet extends StatelessWidget {
+  final PermissionRequest perm;
+  final ValueChanged<PermOption> onDecide;
+  const _PermSheet({required this.perm, required this.onDecide});
+
   @override
   Widget build(BuildContext context) {
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 200),
+    return Container(
       decoration: BoxDecoration(
         color: AppColors.surface,
         borderRadius: BorderRadius.circular(AppRadius.card),
         boxShadow: AppShadows.card,
-        border: widget.highlight
-            ? Border.all(color: AppColors.accent, width: 1.5)
-            : null,
+        border: Border.all(color: AppColors.warning, width: 1),
       ),
       child: Padding(
         padding: const EdgeInsets.all(AppSpacing.lg),
@@ -1371,92 +1189,42 @@ class _ApprovalSheetState extends State<_ApprovalSheet> {
           children: [
             Row(
               children: [
-                const Icon(AppIcons.terminal, size: 16, color: AppColors.reject),
+                const Icon(AppIcons.terminal, size: 16, color: AppColors.warning),
                 const SizedBox(width: 8),
-                const Expanded(
-                    child: Text('Bash · 删除构建产物', style: AppText.title2)),
+                Expanded(child: Text(perm.title, style: AppText.title2)),
                 Container(
                   padding:
                       const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                   decoration: BoxDecoration(
-                    color: AppColors.rejectSoft,
+                    color: AppColors.warningSoft,
                     borderRadius: BorderRadius.circular(AppRadius.pill),
                   ),
-                  child: Text('关键命令',
-                      style:
-                          AppText.monoCaption.copyWith(color: AppColors.reject)),
+                  child: Text('待批准',
+                      style: AppText.monoCaption
+                          .copyWith(color: AppColors.warning)),
                 ),
               ],
             ),
-            const SizedBox(height: AppSpacing.md),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(AppSpacing.md),
-              decoration: BoxDecoration(
-                color: AppColors.background,
-                borderRadius: BorderRadius.circular(AppRadius.thumbnail),
+            if (perm.command.isNotEmpty) ...[
+              const SizedBox(height: AppSpacing.md),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(AppSpacing.md),
+                decoration: BoxDecoration(
+                  color: AppColors.background,
+                  borderRadius: BorderRadius.circular(AppRadius.thumbnail),
+                ),
+                child: Text(perm.command, style: AppText.mono),
               ),
-              child:
-                  const Text('rm -rf build/ && npm run deploy', style: AppText.mono),
-            ),
-            const SizedBox(height: AppSpacing.sm),
-            Pressable(
-              onTap: () => setState(() => _open = !_open),
-              child: Row(
-                children: [
-                  Icon(_open ? AppIcons.chevronDown : AppIcons.chevronRight,
-                      size: 13, color: AppColors.accent),
-                  const SizedBox(width: 5),
-                  Text('展开看完整上下文',
-                      style: AppText.callout.copyWith(color: AppColors.accent)),
-                ],
-              ),
-            ),
-            AnimatedSize(
-              duration: const Duration(milliseconds: 200),
-              curve: Curves.easeOut,
-              alignment: Alignment.topCenter,
-              child: _open
-                  ? Container(
-                      width: double.infinity,
-                      margin: const EdgeInsets.only(top: 8),
-                      padding: const EdgeInsets.all(AppSpacing.md),
-                      decoration: BoxDecoration(
-                        color: AppColors.background,
-                        border: Border.all(color: AppColors.hairline),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Text(
-                        '- 将删除 ./build 下 142 个文件\n'
-                        '- 随后向 prod 环境部署（不可逆）',
-                        style: AppText.monoCaption,
-                      ),
-                    )
-                  : const SizedBox.shrink(),
-            ),
-            const SizedBox(height: AppSpacing.sm),
-            const Text('Kimi 想清理旧 build 再部署——命中关键清单，需要你确认。',
-                style: AppText.caption),
+            ],
             const SizedBox(height: AppSpacing.md),
             Row(
               children: [
-                _Pill(
-                    label: '批准',
-                    bg: AppColors.approve,
-                    fg: AppColors.surface,
-                    onTap: widget.onApprove),
-                const SizedBox(width: AppSpacing.sm),
-                _Pill(
-                    label: '本会话',
-                    bg: AppColors.keyCap,
-                    fg: AppColors.textPrimary,
-                    onTap: widget.onApprove),
-                const SizedBox(width: AppSpacing.sm),
-                _Pill(
-                    label: '拒绝',
-                    bg: AppColors.rejectSoft,
-                    fg: AppColors.reject,
-                    onTap: widget.onReject),
+                for (final opt in perm.options) ...[
+                  Expanded(child: _permBtn(opt)),
+                  if (opt != perm.options.last)
+                    const SizedBox(width: AppSpacing.sm),
+                ],
               ],
             ),
           ],
@@ -1464,56 +1232,78 @@ class _ApprovalSheetState extends State<_ApprovalSheet> {
       ),
     );
   }
-}
 
-class _Pill extends StatelessWidget {
-  final String label;
-  final Color bg;
-  final Color fg;
-  final VoidCallback onTap;
-  const _Pill(
-      {required this.label,
-      required this.bg,
-      required this.fg,
-      required this.onTap});
-  @override
-  Widget build(BuildContext context) {
-    return Expanded(
-      child: Pressable(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 10),
-          decoration: BoxDecoration(
-            color: bg,
-            borderRadius: BorderRadius.circular(AppRadius.pill),
-          ),
-          alignment: Alignment.center,
-          child: Text(label,
-              style: AppText.callout
-                  .copyWith(color: fg, fontWeight: FontWeight.w600)),
+  Widget _permBtn(PermOption opt) {
+    final (bg, fg, label) = switch (opt.kind) {
+      'allow_once' => (AppColors.approve, AppColors.surface, '批准'),
+      'allow_always' => (AppColors.keyCap, AppColors.textPrimary, '本会话'),
+      'reject_once' => (AppColors.rejectSoft, AppColors.reject, '拒绝'),
+      _ => (AppColors.keyCap, AppColors.textPrimary, opt.name ?? opt.optionId),
+    };
+    return Pressable(
+      onTap: () => onDecide(opt),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: BorderRadius.circular(AppRadius.pill),
         ),
+        alignment: Alignment.center,
+        child: Text(label,
+            style: AppText.callout.copyWith(color: fg, fontWeight: FontWeight.w600)),
       ),
     );
   }
 }
 
-// ---------- 设置 ----------
+// ---------- 设置（机器体检真实值 + 中继地址可重连）----------
 
 class _SettingsSheet extends StatefulWidget {
-  const _SettingsSheet({super.key});
+  final SessionStore store;
+  final String relayUrl;
+  final String effortLabel;
+  final ValueChanged<String> onReconnect;
+  final VoidCallback onPalette;
+  const _SettingsSheet({
+    super.key,
+    required this.store,
+    required this.relayUrl,
+    required this.effortLabel,
+    required this.onReconnect,
+    required this.onPalette,
+  });
+
   @override
   State<_SettingsSheet> createState() => _SettingsSheetState();
 }
 
 class _SettingsSheetState extends State<_SettingsSheet> {
+  late final TextEditingController _urlCtrl =
+      TextEditingController(text: widget.relayUrl);
   bool _barkOn = true;
   bool _autoPass = false;
 
   @override
+  void dispose() {
+    _urlCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final h = MediaQuery.of(context).size.height;
+    final cfg = widget.store.configOf(widget.store.currentSid);
+    final prov = _provOf(_cfgCur(cfg, 'model'));
+    final modelOpts = _cfgList(cfg, 'model');
+    final curModel = _cfgCur(cfg, 'model');
+    final modelLabel = modelOpts
+            .firstWhere((o) => o['value'] == curModel,
+                orElse: () => <String, dynamic>{})
+            .let((m) => m['name']?.toString() ?? curModel);
+    final mode = _cfgCur(cfg, 'mode');
+
     return SizedBox(
-      height: h * 0.84,
+      height: h * 0.86,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -1536,6 +1326,15 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                 const SizedBox(width: 8),
                 const Expanded(child: Text('设置', style: AppText.title1)),
                 Pressable(
+                  onTap: widget.onPalette,
+                  child: const SizedBox(
+                    width: 32,
+                    height: 32,
+                    child: Icon(AppIcons.palette,
+                        size: 18, color: AppColors.textSecondary),
+                  ),
+                ),
+                Pressable(
                   onTap: () => Navigator.of(context).pop(),
                   child: const SizedBox(
                     width: 32,
@@ -1552,35 +1351,53 @@ class _SettingsSheetState extends State<_SettingsSheet> {
               padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
               children: [
                 _group('机器体检 · 只读'),
-                _ro('Provider', 'openai'),
-                _ro('默认模型', 'myprovider/my-model'),
-                _ro('Base URL', 'https://api.example.com/v1'),
-                _ro('API Key', 'sk-••••••••1234'),
-                _ro('思考强度', '随模型 support_efforts（全局 [thinking].effort）'),
-                const SizedBox(height: 10),
-                _mcpRow('filesystem', true),
-                _mcpRow('github', true),
-                const SizedBox(height: 10),
-                _ro('Skills', '12 个已加载'),
-                _ro('全局许可', 'manual'),
-                const SizedBox(height: 10),
-                const Text('关键命令清单', style: AppText.caption),
-                const SizedBox(height: 6),
-                const Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  children: [
-                    _Tag('rm -rf'),
-                    _Tag('sudo'),
-                    _Tag('git push -f'),
-                    _Tag('deploy'),
-                    _Tag('.env / 凭证'),
-                  ],
-                ),
+                _ro('Provider', prov.isEmpty ? '—' : prov),
+                _ro('当前模型', modelLabel.isEmpty ? '—' : modelLabel),
+                _ro('当前模式', mode.isEmpty ? '—' : mode),
+                _ro('思考强度', '${widget.effortLabel}（会话级待接通）'),
                 const SizedBox(height: 22),
                 _group('连接'),
-                _ro('中继地址', '100.x.x.x:7331'),
-                const _StatusRow(label: '连接状态', ok: true),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: AppColors.background,
+                    borderRadius: BorderRadius.circular(AppRadius.thumbnail),
+                  ),
+                  child: TextField(
+                    controller: _urlCtrl,
+                    style: AppText.monoCaption,
+                    decoration: const InputDecoration(
+                      isCollapsed: true,
+                      border: InputBorder.none,
+                      contentPadding: EdgeInsets.symmetric(vertical: 10),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Pressable(
+                    onTap: () => widget.onReconnect(_urlCtrl.text.trim()),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 9),
+                      decoration: BoxDecoration(
+                        color: AppColors.textPrimary,
+                        borderRadius: BorderRadius.circular(AppRadius.pill),
+                      ),
+                      child: Text('保存并重连',
+                          style: AppText.callout.copyWith(
+                              color: AppColors.surface,
+                              fontWeight: FontWeight.w600)),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                _StatusRow(
+                    label: '连接状态',
+                    ok: widget.store.relayState == 'ok' ||
+                        widget.store.relayState == 'connecting'),
                 const SizedBox(height: 22),
                 _group('锁屏门铃'),
                 _tg('Bark 推送', _barkOn, (v) => setState(() => _barkOn = v)),
@@ -1627,28 +1444,6 @@ class _SettingsSheetState extends State<_SettingsSheet> {
         ),
       );
 
-  Widget _mcpRow(String name, bool ok) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 5),
-        child: Row(
-          children: [
-            Container(
-              width: 7,
-              height: 7,
-              decoration: BoxDecoration(
-                color: ok ? AppColors.approve : AppColors.reject,
-                shape: BoxShape.circle,
-              ),
-            ),
-            const SizedBox(width: 8),
-            Text(name, style: AppText.mono),
-            const Spacer(),
-            Text(ok ? 'connected' : 'error',
-                style: AppText.monoCaption
-                    .copyWith(color: ok ? AppColors.approve : AppColors.reject)),
-          ],
-        ),
-      );
-
   Widget _tg(String k, bool v, ValueChanged<bool> onChanged) => Padding(
         padding: const EdgeInsets.symmetric(vertical: 4),
         child: Row(
@@ -1690,23 +1485,6 @@ class _StatusRow extends StatelessWidget {
                   .copyWith(color: ok ? AppColors.approve : AppColors.reject)),
         ],
       ),
-    );
-  }
-}
-
-class _Tag extends StatelessWidget {
-  final String t;
-  const _Tag(this.t);
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
-      decoration: BoxDecoration(
-        color: AppColors.rejectSoft,
-        borderRadius: BorderRadius.circular(AppRadius.pill),
-      ),
-      child: Text(t,
-          style: AppText.monoCaption.copyWith(color: AppColors.reject)),
     );
   }
 }
