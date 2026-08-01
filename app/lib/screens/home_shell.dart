@@ -1,53 +1,74 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
+import '../relay/models.dart';
+import '../relay/relay_client.dart';
+import '../relay/session_store.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
 import '../theme/app_dimens.dart';
 import '../theme/app_shadows.dart';
 import '../theme/app_icons.dart';
 import '../widgets/common.dart';
+import '../widgets/stream_block.dart';
 import 'design_showcase.dart';
 
-// ---------- 假数据（接 WebSocket 后由中继填充）----------
+// ---------- 常量 ----------
 
-class _Sess {
-  final String id;
-  final String title;
-  const _Sess(this.id, this.title);
+const _kDefaultRelayUrl = 'ws://127.0.0.1:7331/ws';
+
+// chip = 你的自由文本常用语（点选即发）；slash = Kimi 命令（来自 available_commands）。
+const _chips = ['跑下测试', 'commit 一下', '解释刚干了啥'];
+
+// 思考强度：会话级 ACP 切法待探针确认，此刀占位（受控本地态，不下发）。
+const _effortOpts = [
+  DropdownOption(id: 'low', label: '低'),
+  DropdownOption(id: 'medium', label: '中'),
+  DropdownOption(id: 'high', label: '高'),
+];
+const _effortLabel = {'low': '低', 'medium': '中', 'high': '高'};
+
+const _modeIcon = {
+  'default': AppIcons.modeManual,
+  'plan': AppIcons.modePlan,
+  'auto': AppIcons.modeAuto,
+  'yolo': AppIcons.modeYolo,
+};
+const _modeFallbackDesc = {
+  'default': '危险动作逐一问你',
+  'plan': '只规划，不执行工具',
+  'auto': 'agent 自主决策',
+  'yolo': '自动批准，但可能问你',
+};
+
+// ---------- configOptions 解析（展示层，纯函数）----------
+
+String _provOf(String v) {
+  final i = v.indexOf('/');
+  return i < 0 ? v : v.substring(0, i);
 }
 
-class _Ws {
-  final String name;
-  final List<_Sess> sessions;
-  const _Ws(this.name, this.sessions);
+List<Map<String, dynamic>> _cfgList(dynamic cfg, String id) {
+  if (cfg is! List) return const [];
+  for (final c in cfg) {
+    if (c is Map && c['id'] == id) {
+      final o = c['options'];
+      if (o is List) {
+        return o
+            .map((e) => (e as Map).cast<String, dynamic>())
+            .toList();
+      }
+    }
+  }
+  return const [];
 }
 
-const _modeOptions = [
-  DropdownOption(id: 'default', label: '手动审批', icon: AppIcons.modeManual),
-  DropdownOption(id: 'plan', label: '只读规划', icon: AppIcons.modePlan),
-  DropdownOption(id: 'auto', label: '自动', icon: AppIcons.modeAuto),
-  DropdownOption(id: 'yolo', label: 'YOLO', icon: AppIcons.modeYolo),
-];
-
-const _modelOptions = [
-  DropdownOption(id: 'flash', label: 'Flash'),
-  DropdownOption(id: 'pro', label: 'Pro'),
-];
-
-const _workspaces = [
-  _Ws('kimi-code-multi-device', [
-    _Sess('s1', '重构 payment'),
-    _Sess('s2', '运行 echo HI'),
-    _Sess('s3', '请记住数字 42'),
-  ]),
-  _Ws('v0probe', [
-    _Sess('s4', '运行 sleep 3 && echo DONE_B'),
-    _Sess('s5', '请运行 echo PROBE_HELLO'),
-  ]),
-  _Ws('relay', [
-    _Sess('s6', '哈喽，你知道 DeepSeek 发了新模型吗'),
-    _Sess('s7', 'hello，你是什么模型呀'),
-  ]),
-];
+String _cfgCur(dynamic cfg, String id) {
+  if (cfg is! List) return '';
+  for (final c in cfg) {
+    if (c is Map && c['id'] == id) return c['currentValue']?.toString() ?? '';
+  }
+  return '';
+}
 
 // ---------- 主页 ----------
 
@@ -59,39 +80,227 @@ class HomeShell extends StatefulWidget {
 }
 
 class _HomeShellState extends State<HomeShell> {
-  String _modeId = 'default';
-  String _modelId = 'flash';
-  String _currentId = 's1';
+  final _client = RelayClient();
+  final _store = SessionStore();
+  final _inputCtrl = TextEditingController();
+  final _scrollCtrl = ScrollController();
 
-  bool _pending = true; // 模拟：是否有一个待批准的工具调用
-  bool _approved = false;
-  bool _highlight = false; // 流内锚点 ↔ 底部浮层 联动高亮
+  String _relayUrl = _kDefaultRelayUrl;
+  String _effortId = 'medium'; // 占位
+  String? _slashQuery;
 
-  void _focusSheet() {
-    setState(() => _highlight = true);
-    Future.delayed(const Duration(milliseconds: 650), () {
-      if (mounted) setState(() => _highlight = false);
+  @override
+  void initState() {
+    super.initState();
+    _client.onMessage = _store.handle;
+    _client.onOpen = () => _store.markConnected();
+    _client.onClose = () => _store.markDisconnected(reconnecting: true);
+    _client.onReconnecting = () => _store.markDisconnected(reconnecting: true);
+    _store.addListener(_onStore);
+    _connect(_relayUrl);
+  }
+
+  void _onStore() {
+    setState(() {});
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollCtrl.hasClients) {
+        _scrollCtrl.animateTo(
+          _scrollCtrl.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOut,
+        );
+      }
     });
   }
 
-  void _decide(bool approve) => setState(() {
-        _approved = approve;
-        _pending = false;
-      });
+  Future<void> _connect(String url) async {
+    _relayUrl = url;
+    // RelayClient 自带退避重连，此处只发起首次连接；失败由 onReconnecting 接管。
+    await _client.connect(url);
+  }
+
+  void _cancelCurrent() {
+    final sid = _store.currentSid;
+    if (sid == null) return;
+    _client.send('cancel', sid: sid);
+  }
+
+  // ---- 顶栏选择回调：下发 + 乐观更新 ----
+
+  void _onProvider(String prov) {
+    final sid = _store.currentSid;
+    final cfg = _store.configOf(sid);
+    final models = _cfgList(cfg, 'model')
+        .where((o) => _provOf(o['value']?.toString() ?? '') == prov)
+        .toList();
+    if (models.isEmpty || sid == null) return;
+    final target = models.first['value']?.toString() ?? '';
+    _client.send('set_model', sid: sid, payload: {'value': target});
+    _store.applyConfigOption(sid, 'model', target);
+  }
+
+  void _onModel(String value) {
+    final sid = _store.currentSid;
+    if (sid == null) return;
+    _client.send('set_model', sid: sid, payload: {'value': value});
+    _store.applyConfigOption(sid, 'model', value);
+  }
+
+  void _onMode(String m) {
+    final sid = _store.currentSid;
+    if (sid == null) return;
+    _client.send('set_mode', sid: sid, payload: {'modeId': m});
+    _store.applyConfigOption(sid, 'mode', m);
+  }
+
+  void _onEffort(String e) => setState(() => _effortId = e); // 占位，不下发
+
+  // ---- 输入 / slash / 附件 ----
+
+  void _send(String text) {
+    final t = text.trim();
+    final sid = _store.currentSid;
+    if (t.isEmpty || sid == null || _store.relayState != 'ok') return;
+    _store.addUser(sid, t);
+    _client.send('prompt', sid: sid, payload: {'text': t});
+    _inputCtrl.clear();
+    setState(() => _slashQuery = null);
+  }
+
+  void _onInputChanged(String v) {
+    final q = (v.startsWith('/') && !v.contains(' ')) ? v.substring(1) : null;
+    if (q != _slashQuery) setState(() => _slashQuery = q);
+  }
+
+  void _pickSlash(String s) {
+    setState(() {
+      _inputCtrl.text = '$s ';
+      _inputCtrl.selection =
+          TextSelection.collapsed(offset: _inputCtrl.text.length);
+      _slashQuery = null;
+    });
+  }
+
+  void _onAttach() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('附件上传即将支持',
+            style: AppText.callout.copyWith(color: AppColors.surface)),
+        backgroundColor: AppColors.textPrimary,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        duration: const Duration(milliseconds: 1600),
+      ),
+    );
+  }
+
+  // ---- 抽屉动作 ----
+
+  void _openHistory(SessionMeta m) {
+    _client.send('open_history',
+        sid: m.sessionId, payload: {'sessionId': m.sessionId, 'cwd': m.cwd});
+  }
+
+  void _newSession() => _client.send('new_session', payload: {});
+
+  void _decide(PermOption opt) {
+    final p = _store.pendingOf(_store.currentSid);
+    if (p == null) return;
+    _client.send('permission.decision',
+        sid: p.sid,
+        payload: {'permissionId': p.permissionId, 'optionId': opt.optionId});
+    _store.resolvePermission(p);
+  }
+
+  void _openSettings() => showModalBottomSheet(
+        context: context,
+        isScrollControlled: true,
+        backgroundColor: AppColors.surface,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        builder: (_) => _SettingsSheet(
+          store: _store,
+          relayUrl: _relayUrl,
+          effortLabel: _effortLabel[_effortId] ?? _effortId,
+          onReconnect: (url) {
+            Navigator.of(context).pop();
+            _client.disconnect();
+            _connect(url);
+          },
+          onPalette: () {
+            Navigator.of(context).pop();
+            Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const DesignShowcase()),
+            );
+          },
+        ),
+      );
+
+  /// 待批准队列：全屏列出所有会话的待批准卡，按 sid 分组。
+  void _openQueue() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => _PendingQueuePage(
+          store: _store,
+          client: _client,
+          onPickSession: (sid) {
+            _store.setCurrent(sid);
+            Navigator.of(context).pop();
+          },
+        ),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _client.disconnect();
+    _store.removeListener(_onStore);
+    _inputCtrl.dispose();
+    _scrollCtrl.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final bottomPad = _pending ? 300.0 : 110.0;
+    final sid = _store.currentSid;
+    final cfg = _store.configOf(sid);
+    final blocks = _store.blocksOf(sid);
+    final perm = _store.pendingOf(sid);
+
+    final slashOpen = _slashQuery != null;
+    final cmds = _store.commandsOf(sid);
+    final slashOpts = _slashQuery == null
+        ? const <String>[]
+        : cmds
+            .map((c) => '/${(c as Map)['name']}')
+            .where((s) => _slashQuery!.isEmpty ||
+                s.toLowerCase().contains(_slashQuery!.toLowerCase()))
+            .toList();
+
+    final dockH = perm != null ? 360.0 : (slashOpen ? 230.0 : 150.0);
+    final running = sid != null && _store.sessionStatus(sid) == 'running';
+
     return Scaffold(
       backgroundColor: AppColors.background,
       drawer: Drawer(
         width: 280,
         backgroundColor: AppColors.background,
         child: _SessionDrawer(
-          workspaces: _workspaces,
-          currentId: _currentId,
-          onSelect: (id) => setState(() => _currentId = id),
-          onNew: () {},
+          store: _store,
+          onPick: (m) {
+            Navigator.of(context).pop();
+            _openHistory(m);
+          },
+          onNew: () {
+            Navigator.of(context).pop();
+            _newSession();
+          },
+          onOpenSettings: () {
+            Navigator.of(context).pop();
+            _openSettings();
+          },
         ),
       ),
       body: SafeArea(
@@ -99,33 +308,66 @@ class _HomeShellState extends State<HomeShell> {
         child: Column(
           children: [
             _TopBar(
-              modeId: _modeId,
-              onMode: (m) => setState(() => _modeId = m),
-              modelId: _modelId,
-              onModel: (m) => setState(() => _modelId = m),
+              cfg: cfg,
+              effortId: _effortId,
+              relayState: _store.relayState,
+              onProvider: _onProvider,
+              onModel: _onModel,
+              onEffort: _onEffort,
+              onMode: _onMode,
               onPalette: () => Navigator.of(context).push(
                 MaterialPageRoute(builder: (_) => const DesignShowcase()),
               ),
+            ),
+            _SessionSwitcher(
+              store: _store,
+              onOpenQueue: _openQueue,
+            ),
+            _ConnBanner(
+              state: _store.relayState,
+              lastSyncedAt: _store.lastSyncedAt,
+              onRetry: () => _client.send('restart_kimi'),
             ),
             Expanded(
               child: Stack(
                 clipBehavior: Clip.none,
                 children: [
-                  _Stream(
-                    bottomPad: bottomPad,
-                    pending: _pending,
-                    approved: _approved,
-                    onFocus: _focusSheet,
-                  ),
+                  blocks.isEmpty
+                      ? _EmptyState(online: _store.relayState == 'ok')
+                      : ListView.builder(
+                          controller: _scrollCtrl,
+                          padding: EdgeInsets.fromLTRB(
+                              AppSpacing.pageMargin,
+                              8,
+                              AppSpacing.pageMargin,
+                              dockH),
+                          itemCount: blocks.length,
+                          itemBuilder: (_, i) => Padding(
+                            padding: EdgeInsets.only(
+                                bottom: i == blocks.length - 1
+                                    ? 0
+                                    : AppSpacing.lg),
+                            child: StreamBlockView(block: blocks[i]),
+                          ),
+                        ),
                   Positioned(
                     left: 0,
                     right: 0,
                     bottom: 0,
                     child: _BottomDock(
-                      pending: _pending,
-                      highlight: _highlight,
-                      onApprove: () => _decide(true),
-                      onReject: () => _decide(false),
+                      enabled: _store.relayState == 'ok' && sid != null,
+                      running: running,
+                      pending: perm,
+                      controller: _inputCtrl,
+                      onSend: _send,
+                      onStop: _cancelCurrent,
+                      onChanged: _onInputChanged,
+                      onOpenPlus: _onAttach,
+                      onChip: _send,
+                      slashOpen: slashOpen && slashOpts.isNotEmpty,
+                      slashOpts: slashOpts,
+                      onPickSlash: _pickSlash,
+                      onDecide: _decide,
                     ),
                   ),
                 ],
@@ -138,62 +380,104 @@ class _HomeShellState extends State<HomeShell> {
   }
 }
 
-// ---------- 顶部导航（单行：左汉堡 / 中 model+mode / 右状态+工具）----------
+// ---------- 顶部导航 ----------
 
 class _TopBar extends StatelessWidget {
-  final String modeId;
-  final ValueChanged<String> onMode;
-  final String modelId;
+  final dynamic cfg;
+  final String effortId;
+  final String relayState;
+  final ValueChanged<String> onProvider;
   final ValueChanged<String> onModel;
+  final ValueChanged<String> onEffort;
+  final ValueChanged<String> onMode;
   final VoidCallback onPalette;
 
   const _TopBar({
-    required this.modeId,
-    required this.onMode,
-    required this.modelId,
+    required this.cfg,
+    required this.effortId,
+    required this.relayState,
+    required this.onProvider,
     required this.onModel,
+    required this.onEffort,
+    required this.onMode,
     required this.onPalette,
   });
 
   @override
   Widget build(BuildContext context) {
-    final curMode = _modeOptions.firstWhere((m) => m.id == modeId);
-    final curModel = _modelOptions.firstWhere((m) => m.id == modelId);
+    final modelOpts = _cfgList(cfg, 'model');
+    final curModel = _cfgCur(cfg, 'model');
+    final providers =
+        modelOpts.map((o) => _provOf(o['value']?.toString() ?? '')).toSet().toList();
+    final curProv = _provOf(curModel);
+    final modelsOfProv = modelOpts
+        .where((o) => _provOf(o['value']?.toString() ?? '') == curProv)
+        .toList();
+    final curModelLabel = modelsOfProv
+            .firstWhere((o) => o['value'] == curModel,
+                orElse: () => <String, dynamic>{})
+            .let((m) => (m['name']?.toString() ?? curModel));
+
+    final dot = switch (relayState) {
+      'ok' => AppColors.approve,
+      'degraded' => AppColors.warning,
+      _ => AppColors.placeholder,
+    };
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(8, 10, 8, 10),
       child: Row(
         children: [
           _iconBtn(AppIcons.menu,
               onTap: () => Scaffold.of(context).openDrawer()),
-          const SizedBox(width: 4),
+          const SizedBox(width: 6),
           Expanded(
             child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                ChipDropdown(
-                  triggerIcon: AppIcons.modelChip,
-                  triggerLabel: curModel.label,
-                  options: _modelOptions,
-                  selectedId: modelId,
-                  onSelect: onModel,
-                  minWidth: 110,
+                Flexible(
+                  child: ChipDropdown(
+                    triggerLabel: providers.isEmpty ? '—' : curProv,
+                    options: providers
+                        .map((p) => DropdownOption(id: p, label: p))
+                        .toList(),
+                    selectedId: curProv,
+                    onSelect: onProvider,
+                  ),
                 ),
-                const SizedBox(width: 8),
-                ChipDropdown(
-                  triggerIcon: curMode.icon ?? AppIcons.modeManual,
-                  triggerLabel: curMode.label,
-                  options: _modeOptions,
-                  selectedId: modeId,
-                  onSelect: onMode,
-                  minWidth: 130,
+                const SizedBox(width: 5),
+                Flexible(
+                  child: ChipDropdown(
+                    triggerLabel:
+                        modelsOfProv.isEmpty ? '—' : (curModelLabel.isEmpty ? '—' : curModelLabel),
+                    options: modelsOfProv
+                        .map((o) => DropdownOption(
+                            id: o['value']?.toString() ?? '',
+                            label: o['name']?.toString() ?? ''))
+                        .toList(),
+                    selectedId: curModel,
+                    onSelect: onModel,
+                  ),
+                ),
+                const SizedBox(width: 5),
+                Flexible(
+                  child: ChipDropdown(
+                    triggerLabel: _effortLabel[effortId] ?? effortId,
+                    options: _effortOpts,
+                    selectedId: effortId,
+                    onSelect: onEffort,
+                  ),
                 ),
               ],
             ),
           ),
-          const SizedBox(width: 4),
-          const BreathingDot(color: AppColors.approve),
-          const SizedBox(width: 12),
-          _iconBtn(AppIcons.settings),
+          const SizedBox(width: 6),
+          Container(
+            width: 9,
+            height: 9,
+            decoration: BoxDecoration(color: dot, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 10),
+          _ModeIconMenu(cfg: cfg, onMode: onMode),
           const SizedBox(width: 4),
           _iconBtn(AppIcons.palette, onTap: onPalette),
         ],
@@ -213,45 +497,251 @@ class _TopBar extends StatelessWidget {
   }
 }
 
-// ---------- 会话抽屉（按工作区分组，参考 kimi web）----------
+/// 给 Map 加一个 let，方便链式取 name 兜底。
+extension _MapLet<K, V> on Map<K, V> {
+  R let<R>(R Function(Map<K, V>) f) => f(this);
+}
 
-class _SessionDrawer extends StatelessWidget {
-  final List<_Ws> workspaces;
-  final String currentId;
-  final ValueChanged<String> onSelect;
-  final VoidCallback onNew;
+// ---------- mode 图标菜单（真实 mode options）----------
 
-  const _SessionDrawer({
-    super.key,
-    required this.workspaces,
-    required this.currentId,
-    required this.onSelect,
-    required this.onNew,
-  });
+class _ModeIconMenu extends StatefulWidget {
+  final dynamic cfg;
+  final ValueChanged<String> onMode;
+  const _ModeIconMenu({required this.cfg, required this.onMode});
+
+  @override
+  State<_ModeIconMenu> createState() => _ModeIconMenuState();
+}
+
+class _ModeIconMenuState extends State<_ModeIconMenu> {
+  OverlayEntry? _entry;
+  bool _down = false;
+  bool get _open => _entry != null;
+
+  void _toggle() => _open ? _close() : _openMenu();
+
+  List<Map<String, dynamic>> get _modes {
+    final real = _cfgList(widget.cfg, 'mode');
+    if (real.isNotEmpty) return real;
+    return _modeIcon.keys
+        .map((k) => <String, dynamic>{
+              'value': k,
+              'name': k,
+              'description': _modeFallbackDesc[k],
+            })
+        .toList();
+  }
+
+  void _openMenu() {
+    final box = context.findRenderObject() as RenderBox;
+    final off = box.localToGlobal(Offset.zero);
+    final cur = _cfgCur(widget.cfg, 'mode');
+    _entry = OverlayEntry(
+      builder: (ctx) => Stack(
+        children: [
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _close,
+              child: const SizedBox.shrink(),
+            ),
+          ),
+          Positioned(
+            top: off.dy + box.size.height + 6,
+            right: 8,
+            width: 220,
+            child: Container(
+              clipBehavior: Clip.antiAlias,
+              decoration: BoxDecoration(
+                color: AppColors.surface,
+                borderRadius: BorderRadius.circular(AppRadius.card),
+                boxShadow: AppShadows.popup,
+              ),
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: _modes
+                    .map((m) => _MenuRow(
+                          icon: _modeIcon[m['value']] ?? AppIcons.modeManual,
+                          label: m['name']?.toString() ?? m['value']?.toString() ?? '',
+                          subtitle: m['description']?.toString() ??
+                              _modeFallbackDesc[m['value']],
+                          selected: m['value'] == cur,
+                          onTap: () {
+                            widget.onMode(m['value']?.toString() ?? '');
+                            _close();
+                          },
+                        ))
+                    .toList(),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    Overlay.of(context).insert(_entry!);
+    setState(() {});
+  }
+
+  void _close() {
+    _entry?.remove();
+    _entry = null;
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    _entry?.remove();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
+    final cur = _cfgCur(widget.cfg, 'mode');
+    final icon = _modeIcon[cur] ?? AppIcons.modeManual;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTapDown: (_) => setState(() => _down = true),
+      onTapUp: (_) => setState(() => _down = false),
+      onTapCancel: () => setState(() => _down = false),
+      onTap: _toggle,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 120),
+        width: 32,
+        height: 32,
+        decoration: BoxDecoration(
+          color: _down ? const Color(0xFFDADAE0) : AppColors.keyCap,
+          shape: BoxShape.circle,
+        ),
+        child: Icon(icon, size: 16, color: AppColors.textPrimary),
+      ),
+    );
+  }
+}
+
+class _MenuRow extends StatefulWidget {
+  final IconData? icon;
+  final String label;
+  final String? subtitle;
+  final bool selected;
+  final VoidCallback onTap;
+  const _MenuRow({
+    required this.label,
+    this.icon,
+    this.subtitle,
+    this.selected = false,
+    required this.onTap,
+  });
+
+  @override
+  State<_MenuRow> createState() => _MenuRowState();
+}
+
+class _MenuRowState extends State<_MenuRow> {
+  bool _down = false;
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTapDown: (_) => setState(() => _down = true),
+      onTapUp: (_) => setState(() => _down = false),
+      onTapCancel: () => setState(() => _down = false),
+      onTap: widget.onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 110),
+        margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: _down ? AppColors.keyCap : Colors.transparent,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Row(
+          children: [
+            if (widget.icon != null) ...[
+              Icon(widget.icon, size: 16, color: AppColors.textSecondary),
+              const SizedBox(width: 10),
+            ],
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(widget.label,
+                      style: AppText.body.copyWith(
+                        color: AppColors.textPrimary,
+                        fontWeight: FontWeight.w600,
+                      )),
+                  if (widget.subtitle != null) ...[
+                    const SizedBox(height: 2),
+                    Text(widget.subtitle!, style: AppText.caption),
+                  ],
+                ],
+              ),
+            ),
+            if (widget.selected)
+              const Padding(
+                padding: EdgeInsets.only(left: 10),
+                child: Icon(AppIcons.check, size: 16, color: AppColors.accent),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ---------- 会话抽屉：真实 session.list + 搜索 + 工作区分组 ----------
+
+class _SessionDrawer extends StatefulWidget {
+  final SessionStore store;
+  final ValueChanged<SessionMeta> onPick;
+  final VoidCallback onNew;
+  final VoidCallback onOpenSettings;
+  const _SessionDrawer({
+    super.key,
+    required this.store,
+    required this.onPick,
+    required this.onNew,
+    required this.onOpenSettings,
+  });
+
+  @override
+  State<_SessionDrawer> createState() => _SessionDrawerState();
+}
+
+class _SessionDrawerState extends State<_SessionDrawer> {
+  String _q = '';
+
+  String _groupKey(SessionMeta m) {
+    final parts = m.cwd.split('/').where((p) => p.isNotEmpty).toList();
+    return parts.length >= 2
+        ? '${parts[parts.length - 2]}/${parts.last}'
+        : (parts.isNotEmpty ? parts.last : '—');
+  }
+
+  bool _match(SessionMeta m) =>
+      _q.isEmpty || m.title.toLowerCase().contains(_q.toLowerCase());
+
+  @override
+  Widget build(BuildContext context) {
+    final all = widget.store.history.where(_match).toList();
+    final groups = <String, List<SessionMeta>>{};
+    for (final m in all) {
+      groups.putIfAbsent(_groupKey(m), () => []).add(m);
+    }
+    final cur = widget.store.currentSid;
+
     return SafeArea(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
             child: Pressable(
-              onTap: () {
-                onNew();
-                Navigator.of(context).pop();
-              },
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 11,
-                ),
-                decoration: BoxDecoration(
-                  color: AppColors.surface,
-                  borderRadius: BorderRadius.circular(AppRadius.thumbnail),
-                  boxShadow: AppShadows.input,
-                ),
+              onTap: widget.onNew,
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
                 child: Row(
                   children: [
                     Container(
@@ -266,45 +756,97 @@ class _SessionDrawer extends StatelessWidget {
                     ),
                     const SizedBox(width: 10),
                     Text('新建会话',
-                        style: AppText.callout.copyWith(
-                            fontWeight: FontWeight.w600)),
+                        style: AppText.callout
+                            .copyWith(fontWeight: FontWeight.w600)),
                   ],
                 ),
               ),
             ),
           ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+            child: Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+              decoration: BoxDecoration(
+                color: AppColors.surface,
+                borderRadius: BorderRadius.circular(AppRadius.pill),
+                boxShadow: AppShadows.input,
+              ),
+              child: Row(
+                children: [
+                  const Icon(AppIcons.search,
+                      size: 15, color: AppColors.textSecondary),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextField(
+                      style: AppText.callout,
+                      onChanged: (v) => setState(() => _q = v),
+                      decoration: const InputDecoration(
+                        isCollapsed: true,
+                        border: InputBorder.none,
+                        hintText: '搜索会话',
+                        hintStyle: AppText.placeholder,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
           const Padding(
-            padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
+            padding: EdgeInsets.fromLTRB(16, 8, 16, 8),
             child: Text('工作区', style: AppText.monoCaption),
           ),
           Expanded(
-            child: ListView(
-              padding: const EdgeInsets.fromLTRB(8, 0, 8, 16),
-              children: [
-                for (final ws in workspaces) ...[
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(8, 10, 8, 4),
-                    child: Row(
-                      children: [
-                        const Icon(AppIcons.folder,
-                            size: 15, color: AppColors.textSecondary),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            ws.name,
-                            style: AppText.callout.copyWith(
-                                fontWeight: FontWeight.w600),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
+            child: groups.isEmpty
+                ? Center(
+                    child: Text('无匹配会话', style: AppText.caption),
+                  )
+                : ListView(
+                    padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                    children: [
+                      for (final entry in groups.entries) ...[
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(8, 10, 8, 4),
+                          child: Row(
+                            children: [
+                              const Icon(AppIcons.folder,
+                                  size: 15, color: AppColors.textSecondary),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(entry.key,
+                                    style: AppText.callout.copyWith(
+                                        fontWeight: FontWeight.w600),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis),
+                              ),
+                            ],
                           ),
                         ),
+                        for (final m in entry.value) _row(m, m.sessionId == cur),
                       ],
-                    ),
+                    ],
                   ),
-                  for (final s in ws.sessions)
-                    _sessionRow(context, s),
-                ],
-              ],
+          ),
+          Container(
+            decoration: const BoxDecoration(
+              border: Border(top: BorderSide(color: AppColors.hairline)),
+            ),
+            child: Pressable(
+              onTap: widget.onOpenSettings,
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                child: Row(
+                  children: [
+                    const Icon(AppIcons.settings,
+                        size: 18, color: AppColors.textSecondary),
+                    const SizedBox(width: 10),
+                    Text('设置', style: AppText.callout),
+                  ],
+                ),
+              ),
             ),
           ),
         ],
@@ -312,13 +854,9 @@ class _SessionDrawer extends StatelessWidget {
     );
   }
 
-  Widget _sessionRow(BuildContext context, _Sess s) {
-    final sel = s.id == currentId;
+  Widget _row(SessionMeta m, bool sel) {
     return Pressable(
-      onTap: () {
-        onSelect(s.id);
-        Navigator.of(context).pop();
-      },
+      onTap: () => widget.onPick(m),
       child: Container(
         margin: const EdgeInsets.symmetric(vertical: 2),
         decoration: BoxDecoration(
@@ -341,7 +879,7 @@ class _SessionDrawer extends StatelessWidget {
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(12, 9, 12, 9),
                   child: Text(
-                    s.title,
+                    m.title.isEmpty ? '（无标题）' : m.title,
                     style: AppText.callout.copyWith(
                       color: AppColors.textPrimary,
                       fontWeight: sel ? FontWeight.w600 : FontWeight.w400,
@@ -359,330 +897,68 @@ class _SessionDrawer extends StatelessWidget {
   }
 }
 
-// ---------- 活的流 ----------
+// ---------- 空状态：点阵装饰（规范 7.1）----------
 
-class _Stream extends StatelessWidget {
-  final double bottomPad;
-  final bool pending;
-  final bool approved;
-  final VoidCallback onFocus;
-
-  const _Stream({
-    required this.bottomPad,
-    required this.pending,
-    required this.approved,
-    required this.onFocus,
-  });
+class _EmptyState extends StatelessWidget {
+  final bool online;
+  const _EmptyState({required this.online});
 
   @override
   Widget build(BuildContext context) {
-    return ListView(
-      padding: EdgeInsets.fromLTRB(
-        AppSpacing.pageMargin,
-        8,
-        AppSpacing.pageMargin,
-        bottomPad,
-      ),
-      children: [
-        const _UserBubble('运行 echo SENTINEL 并告诉我输出'),
-        const SizedBox(height: AppSpacing.lg),
-        const _ThinkingBlock('用户想运行 echo，这是个无害操作，直接执行并返回输出即可…'),
-        const SizedBox(height: AppSpacing.lg),
-        const _ToolCardDone(
-          title: 'Bash',
-          command: 'echo SENTINEL',
-          output: 'SENTINEL',
-          ok: true,
-        ),
-        const SizedBox(height: AppSpacing.lg),
-        const _ReplyText('命令输出为：`SENTINEL`'),
-        const SizedBox(height: AppSpacing.lg),
-        const _UserBubble('再清理一下 build 目录'),
-        const SizedBox(height: AppSpacing.lg),
-        const _ThinkingBlock('要删除 build 目录，这是不可逆操作，必须先取得用户许可…'),
-        const SizedBox(height: AppSpacing.lg),
-        if (pending)
-          _ApprovalAnchor(
-            command: 'rm -rf build/ && npm run deploy',
-            onTap: onFocus,
-          )
-        else
-          _ToolCardDone(
-            title: 'Bash',
-            command: 'rm -rf build/ && npm run deploy',
-            output: approved ? 'build cleaned, deployed to prod' : '已拒绝',
-            ok: approved,
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const _DotMatrix(),
+          const SizedBox(height: AppSpacing.xl),
+          Text(
+            online ? '尽管问，Kimi 在听' : '连接中继后开始',
+            style: AppText.body.copyWith(color: AppColors.textSecondary),
           ),
-      ],
-    );
-  }
-}
-
-class _UserBubble extends StatelessWidget {
-  final String text;
-  const _UserBubble(this.text);
-  @override
-  Widget build(BuildContext context) {
-    return Align(
-      alignment: Alignment.centerRight,
-      child: Container(
-        constraints: const BoxConstraints(maxWidth: 260),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          color: AppColors.accentSoft,
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: Text(text, style: AppText.body),
+        ],
       ),
     );
   }
 }
 
-class _ReplyText extends StatelessWidget {
-  final String text;
-  const _ReplyText(this.text);
-  @override
-  Widget build(BuildContext context) => Text(text, style: AppText.body);
-}
+class _DotMatrix extends StatelessWidget {
+  const _DotMatrix();
+  static const double _dot = 6;
+  static const double _gap = 5;
 
-class _ThinkingBlock extends StatefulWidget {
-  final String text;
-  const _ThinkingBlock(this.text);
-  @override
-  State<_ThinkingBlock> createState() => _ThinkingBlockState();
-}
-
-class _ThinkingBlockState extends State<_ThinkingBlock> {
-  bool _open = false;
   @override
   Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: AppColors.thinkSoft,
-        borderRadius: BorderRadius.circular(AppRadius.thumbnail),
-      ),
-      child: AnimatedSize(
-        duration: const Duration(milliseconds: 200),
-        curve: Curves.easeOut,
-        alignment: Alignment.topCenter,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Pressable(
-              onTap: () => setState(() => _open = !_open),
-              child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                child: Row(
-                  children: [
-                    Icon(
-                      _open ? AppIcons.chevronDown : AppIcons.chevronRight,
-                      size: 14,
-                      color: AppColors.think,
-                    ),
-                    const SizedBox(width: 6),
-                    Text('思考',
-                        style:
-                            AppText.callout.copyWith(color: AppColors.think)),
-                  ],
-                ),
-              ),
-            ),
-            if (_open)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                child: Text(
-                  widget.text,
-                  style: AppText.callout.copyWith(
-                    color: AppColors.think,
-                    fontStyle: FontStyle.italic,
-                  ),
-                ),
-              ),
-          ],
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: List.generate(
+        4,
+        (b) => Padding(
+          padding: EdgeInsets.only(right: b < 3 ? 12 : 0),
+          child: _block(b),
         ),
       ),
     );
   }
-}
 
-class _ToolCardDone extends StatefulWidget {
-  final String title;
-  final String command;
-  final String output;
-  final bool ok;
-  const _ToolCardDone({
-    required this.title,
-    required this.command,
-    required this.output,
-    required this.ok,
-  });
-  @override
-  State<_ToolCardDone> createState() => _ToolCardDoneState();
-}
-
-class _ToolCardDoneState extends State<_ToolCardDone> {
-  bool _open = false;
-  @override
-  Widget build(BuildContext context) {
-    final statusColor = widget.ok ? AppColors.approve : AppColors.reject;
-    return Container(
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(AppRadius.thumbnail),
-        boxShadow: AppShadows.card,
-      ),
-      child: IntrinsicHeight(
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Container(
-              width: 4,
-              decoration: BoxDecoration(
-                color: statusColor,
-                borderRadius: const BorderRadius.only(
-                  topLeft: Radius.circular(AppRadius.thumbnail),
-                  bottomLeft: Radius.circular(AppRadius.thumbnail),
-                ),
-              ),
-            ),
-            Expanded(
-              child: AnimatedSize(
-                duration: const Duration(milliseconds: 200),
-                curve: Curves.easeOut,
-                alignment: Alignment.topCenter,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Pressable(
-                      onTap: () => setState(() => _open = !_open),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 11,
-                        ),
-                        child: Row(
-                          children: [
-                            const Icon(AppIcons.terminal,
-                                size: 14, color: AppColors.textSecondary),
-                            const SizedBox(width: 8),
-                            Text(widget.title, style: AppText.mono),
-                            const Spacer(),
-                            Icon(widget.ok ? AppIcons.check : AppIcons.close,
-                                size: 13, color: statusColor),
-                            const SizedBox(width: 4),
-                            Text(widget.ok ? '完成' : '已拒绝',
-                                style: AppText.monoCaption
-                                    .copyWith(color: statusColor)),
-                            const SizedBox(width: 6),
-                            Icon(
-                              _open
-                                  ? AppIcons.chevronDown
-                                  : AppIcons.chevronRight,
-                              size: 13,
-                              color: AppColors.placeholder,
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    if (_open) ...[
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-                        child: Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            color: AppColors.background,
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Text(widget.command, style: AppText.mono),
-                        ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                        child: Text(
-                          '${widget.ok ? '✓' : '✗'} ${widget.output}',
-                          style: AppText.monoCaption
-                              .copyWith(color: statusColor),
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _ApprovalAnchor extends StatelessWidget {
-  final String command;
-  final VoidCallback onTap;
-  const _ApprovalAnchor({required this.command, required this.onTap});
-  @override
-  Widget build(BuildContext context) {
-    return Pressable(
-      onTap: onTap,
-      child: Container(
-        decoration: BoxDecoration(
-          color: AppColors.surface,
-          borderRadius: BorderRadius.circular(AppRadius.thumbnail),
-          boxShadow: AppShadows.card,
-        ),
-        child: IntrinsicHeight(
+  Widget _block(int seed) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: List.generate(
+        3,
+        (r) => Padding(
+          padding: EdgeInsets.only(bottom: r < 2 ? _gap : 0),
           child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Container(
-                width: 4,
-                decoration: const BoxDecoration(
-                  color: AppColors.warning,
-                  borderRadius: BorderRadius.only(
-                    topLeft: Radius.circular(AppRadius.thumbnail),
-                    bottomLeft: Radius.circular(AppRadius.thumbnail),
-                  ),
-                ),
-              ),
-              Expanded(
-                child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-                  child: Row(
-                    children: [
-                      const Icon(AppIcons.terminal,
-                          size: 14, color: AppColors.warning),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(command,
-                            style: AppText.mono,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis),
-                      ),
-                      const SizedBox(width: 8),
-                      Container(
-                        width: 7,
-                        height: 7,
-                        decoration: const BoxDecoration(
-                          color: AppColors.warning,
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                      const SizedBox(width: 5),
-                      Text('待批准',
-                          style: AppText.monoCaption
-                              .copyWith(color: AppColors.warning)),
-                      const SizedBox(width: 4),
-                      const Icon(AppIcons.chevronDown,
-                          size: 13, color: AppColors.warning),
-                    ],
-                  ),
-                ),
-              ),
-            ],
+            mainAxisSize: MainAxisSize.min,
+            children: List.generate(4, (c) {
+              final n = (seed * 13 + r * 7 + c * 5) % 10;
+              final color = n < 6 ? const Color(0xFFD4D6DA) : AppColors.dots[n - 5];
+              return Container(
+                width: _dot,
+                height: _dot,
+                margin: EdgeInsets.only(right: c < 3 ? _gap : 0),
+                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+              );
+            }),
           ),
         ),
       ),
@@ -693,16 +969,34 @@ class _ApprovalAnchor extends StatelessWidget {
 // ---------- 底部 dock ----------
 
 class _BottomDock extends StatelessWidget {
-  final bool pending;
-  final bool highlight;
-  final VoidCallback onApprove;
-  final VoidCallback onReject;
+  final bool enabled;
+  final bool running;
+  final PermissionRequest? pending;
+  final TextEditingController controller;
+  final ValueChanged<String> onSend;
+  final VoidCallback onStop;
+  final ValueChanged<String> onChanged;
+  final VoidCallback onOpenPlus;
+  final ValueChanged<String> onChip;
+  final bool slashOpen;
+  final List<String> slashOpts;
+  final ValueChanged<String> onPickSlash;
+  final ValueChanged<PermOption> onDecide;
 
   const _BottomDock({
+    required this.enabled,
+    required this.running,
     required this.pending,
-    required this.highlight,
-    required this.onApprove,
-    required this.onReject,
+    required this.controller,
+    required this.onSend,
+    required this.onStop,
+    required this.onChanged,
+    required this.onOpenPlus,
+    required this.onChip,
+    required this.slashOpen,
+    required this.slashOpts,
+    required this.onPickSlash,
+    required this.onDecide,
   });
 
   @override
@@ -728,22 +1022,59 @@ class _BottomDock extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (pending) ...[
+              if (pending != null) ...[
                 Padding(
                   padding: const EdgeInsets.symmetric(
                       horizontal: AppSpacing.pageMargin),
-                  child: _ApprovalSheet(
-                    highlight: highlight,
-                    onApprove: onApprove,
-                    onReject: onReject,
-                  ),
+                  child: _PermSheet(perm: pending!, onDecide: onDecide),
                 ),
                 const SizedBox(height: 8),
               ],
-              const Padding(
+              SizedBox(
+                height: 34,
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: AppSpacing.pageMargin),
+                  itemCount: _chips.length,
+                  separatorBuilder: (_, __) =>
+                      const SizedBox(width: AppSpacing.sm),
+                  itemBuilder: (_, i) => Pressable(
+                    onTap: () => onChip(_chips[i]),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 13, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: AppColors.keyCap,
+                        borderRadius: BorderRadius.circular(AppRadius.pill),
+                      ),
+                      alignment: Alignment.center,
+                      child: Text(_chips[i],
+                          style: AppText.callout
+                              .copyWith(color: AppColors.textPrimary)),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              if (slashOpen)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                      AppSpacing.pageMargin, 0, AppSpacing.pageMargin, 8),
+                  child: _SlashPanel(opts: slashOpts, onPick: onPickSlash),
+                ),
+              Padding(
                 padding:
-                    EdgeInsets.symmetric(horizontal: AppSpacing.pageMargin),
-                child: _InputBar(),
+                    const EdgeInsets.symmetric(horizontal: AppSpacing.pageMargin),
+                child: _InputBar(
+                  enabled: enabled,
+                  running: running,
+                  controller: controller,
+                  onSend: onSend,
+                  onStop: onStop,
+                  onChanged: onChanged,
+                  onOpenPlus: onOpenPlus,
+                ),
               ),
             ],
           ),
@@ -753,129 +1084,760 @@ class _BottomDock extends StatelessWidget {
   }
 }
 
-class _ApprovalSheet extends StatefulWidget {
-  final bool highlight;
-  final VoidCallback onApprove;
-  final VoidCallback onReject;
-  const _ApprovalSheet({
-    required this.highlight,
-    required this.onApprove,
-    required this.onReject,
-  });
-  @override
-  State<_ApprovalSheet> createState() => _ApprovalSheetState();
-}
-
-class _ApprovalSheetState extends State<_ApprovalSheet> {
-  bool _open = false;
+class _SlashPanel extends StatelessWidget {
+  final List<String> opts;
+  final ValueChanged<String> onPick;
+  const _SlashPanel({required this.opts, required this.onPick});
   @override
   Widget build(BuildContext context) {
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 200),
+    return Container(
+      constraints: const BoxConstraints(maxHeight: 180),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(AppRadius.thumbnail),
+        boxShadow: AppShadows.popup,
+      ),
+      child: ListView(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 4, 14, 6),
+            child: Row(
+              children: [
+                const Icon(AppIcons.command,
+                    size: 13, color: AppColors.textSecondary),
+                const SizedBox(width: 6),
+                Text('快捷命令 · 选中后填入，可继续编辑',
+                    style: AppText.monoCaption),
+              ],
+            ),
+          ),
+          for (final s in opts)
+            Pressable(
+              onTap: () => onPick(s),
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                child: Text(s, style: AppText.mono),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _InputBar extends StatelessWidget {
+  final bool enabled;
+  final bool running;
+  final TextEditingController controller;
+  final ValueChanged<String> onSend;
+  final VoidCallback onStop;
+  final ValueChanged<String> onChanged;
+  final VoidCallback onOpenPlus;
+  const _InputBar({
+    required this.enabled,
+    required this.running,
+    required this.controller,
+    required this.onSend,
+    required this.onStop,
+    required this.onChanged,
+    required this.onOpenPlus,
+  });
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(AppRadius.card),
+        boxShadow: AppShadows.input,
+      ),
+      child: Row(
+        children: [
+          Pressable(
+            onTap: onOpenPlus,
+            child: Container(
+              width: 32,
+              height: 32,
+              decoration: const BoxDecoration(
+                  color: AppColors.keyCap, shape: BoxShape.circle),
+              child:
+                  const Icon(AppIcons.plus, size: 18, color: AppColors.textSecondary),
+            ),
+          ),
+          const SizedBox(width: AppSpacing.sm),
+          Expanded(
+            child: TextField(
+              controller: controller,
+              enabled: enabled,
+              style: AppText.body,
+              maxLines: 1,
+              textInputAction: TextInputAction.send,
+              onChanged: onChanged,
+              onSubmitted: onSend,
+              decoration: InputDecoration(
+                isCollapsed: true,
+                border: InputBorder.none,
+                hintText: enabled ? '尽管问…' : '先连接中继',
+                hintStyle: AppText.placeholder,
+                contentPadding: const EdgeInsets.symmetric(vertical: 8),
+              ),
+            ),
+          ),
+          const SizedBox(width: AppSpacing.sm),
+          // §13「停」可见性随状态：流式中亮且显眼（占发送位），空闲时是发送。
+          running
+              ? Pressable(
+                  onTap: onStop,
+                  child: Container(
+                    width: 32,
+                    height: 32,
+                    decoration: const BoxDecoration(
+                      color: AppColors.reject,
+                      shape: BoxShape.circle,
+                    ),
+                    child:
+                        const Icon(AppIcons.stop, size: 14, color: AppColors.surface),
+                  ),
+                )
+              : Pressable(
+                  onTap: enabled ? () => onSend(controller.text) : () {},
+                  child: Container(
+                    width: 32,
+                    height: 32,
+                    decoration: BoxDecoration(
+                      color: enabled ? AppColors.textPrimary : AppColors.keyCap,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(AppIcons.send,
+                        size: 16,
+                        color:
+                            enabled ? AppColors.surface : AppColors.placeholder),
+                  ),
+                ),
+        ],
+      ),
+    );
+  }
+}
+
+// ---------- 批准浮层（真实 permission）----------
+
+/// 批准卡超时兜底（中继未给 deadline 时用）。与中继默认阈值对齐。
+const _kDefaultPermTimeout = Duration(minutes: 5);
+
+class _PermSheet extends StatefulWidget {
+  final PermissionRequest perm;
+  final ValueChanged<PermOption> onDecide;
+  const _PermSheet({required this.perm, required this.onDecide});
+
+  @override
+  State<_PermSheet> createState() => _PermSheetState();
+}
+
+class _PermSheetState extends State<_PermSheet> {
+  bool _expanded = false;
+  late final DateTime _deadline;
+  Timer? _t;
+  Duration _remaining = Duration.zero;
+
+  @override
+  void initState() {
+    super.initState();
+    _deadline = widget.perm.deadline ??
+        DateTime.now().add(_kDefaultPermTimeout);
+    _tick();
+    _t = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) _tick();
+    });
+  }
+
+  @override
+  void dispose() {
+    _t?.cancel();
+    super.dispose();
+  }
+
+  void _tick() {
+    _remaining = _deadline.difference(DateTime.now());
+    if (_remaining.isNegative) _remaining = Duration.zero;
+    setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = widget.perm;
+    final critical = isCriticalCommand(p.command);
+    final barColor = critical ? AppColors.reject : AppColors.textSecondary;
+
+    return Container(
       decoration: BoxDecoration(
         color: AppColors.surface,
         borderRadius: BorderRadius.circular(AppRadius.card),
         boxShadow: AppShadows.card,
-        border: widget.highlight
-            ? Border.all(color: AppColors.accent, width: 1.5)
-            : null,
       ),
-      child: Padding(
-        padding: const EdgeInsets.all(AppSpacing.lg),
-        child: Column(
+      child: IntrinsicHeight(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // §UI规范五：左侧 3px 语义色条（关键=红，普通=中性）。
+            Container(
+              width: 3,
+              decoration: BoxDecoration(
+                color: barColor,
+                borderRadius: const BorderRadius.only(
+                  topLeft: Radius.circular(AppRadius.card),
+                  bottomLeft: Radius.circular(AppRadius.card),
+                ),
+              ),
+            ),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.all(AppSpacing.lg),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(AppIcons.terminal, size: 16, color: barColor),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text(p.title, style: AppText.title2)),
+                        _countdownChip(critical),
+                        const SizedBox(width: 6),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: AppColors.warningSoft,
+                            borderRadius:
+                                BorderRadius.circular(AppRadius.pill),
+                          ),
+                          child: Text('待批准',
+                              style: AppText.monoCaption
+                                  .copyWith(color: AppColors.warning)),
+                        ),
+                      ],
+                    ),
+                    if (p.command.isNotEmpty) ...[
+                      const SizedBox(height: AppSpacing.md),
+                      _commandBox(p.command),
+                    ],
+                    const SizedBox(height: AppSpacing.md),
+                    Row(
+                      children: [
+                        for (final opt in p.options) ...[
+                          Expanded(child: _permBtn(opt)),
+                          if (opt != p.options.last)
+                            const SizedBox(width: AppSpacing.sm),
+                        ],
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// §10 3.1 命令原文：单行截断，全文靠展开。§3.3 展开是一次免费窥探，不触发 outcome。
+  Widget _commandBox(String cmd) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => setState(() => _expanded = !_expanded),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(AppSpacing.md),
+        decoration: BoxDecoration(
+          color: AppColors.background,
+          borderRadius: BorderRadius.circular(AppRadius.thumbnail),
+        ),
+        child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
+            Expanded(
+              child: Text(
+                cmd,
+                style: AppText.mono,
+                maxLines: _expanded ? null : 1,
+                overflow: _expanded ? null : TextOverflow.ellipsis,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Icon(
+              _expanded ? AppIcons.chevronDown : AppIcons.chevronRight,
+              size: 14,
+              color: AppColors.textSecondary,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _countdownChip(bool critical) {
+    final m = _remaining.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = _remaining.inSeconds.remainder(60).toString().padLeft(2, '0');
+    final out = _remaining == Duration.zero;
+    final color = out
+        ? AppColors.reject
+        : (critical || _remaining.inSeconds < 60
+            ? AppColors.reject
+            : AppColors.textSecondary);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(AppRadius.pill),
+      ),
+      child: Text(out ? '已超时' : '$m:$s',
+          style: AppText.monoCaption.copyWith(color: color)),
+    );
+  }
+
+  Widget _permBtn(PermOption opt) {
+    final (bg, fg, label) = switch (opt.kind) {
+      'allow_once' => (AppColors.approve, AppColors.surface, '批准'),
+      'allow_always' => (AppColors.keyCap, AppColors.textPrimary, '本会话'),
+      'reject_once' => (AppColors.rejectSoft, AppColors.reject, '拒绝'),
+      _ => (AppColors.keyCap, AppColors.textPrimary, opt.name ?? opt.optionId),
+    };
+    return Pressable(
+      onTap: () => widget.onDecide(opt),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: BorderRadius.circular(AppRadius.pill),
+        ),
+        alignment: Alignment.center,
+        child: Text(label,
+            style: AppText.callout.copyWith(color: fg, fontWeight: FontWeight.w600)),
+      ),
+    );
+  }
+}
+
+// ---------- 设置（机器体检真实值 + 中继地址可重连）----------
+
+class _SettingsSheet extends StatefulWidget {
+  final SessionStore store;
+  final String relayUrl;
+  final String effortLabel;
+  final ValueChanged<String> onReconnect;
+  final VoidCallback onPalette;
+  const _SettingsSheet({
+    super.key,
+    required this.store,
+    required this.relayUrl,
+    required this.effortLabel,
+    required this.onReconnect,
+    required this.onPalette,
+  });
+
+  @override
+  State<_SettingsSheet> createState() => _SettingsSheetState();
+}
+
+class _SettingsSheetState extends State<_SettingsSheet> {
+  late final TextEditingController _urlCtrl =
+      TextEditingController(text: widget.relayUrl);
+  bool _barkOn = true;
+  bool _autoPass = false;
+
+  @override
+  void dispose() {
+    _urlCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final h = MediaQuery.of(context).size.height;
+    final cfg = widget.store.configOf(widget.store.currentSid);
+    final prov = _provOf(_cfgCur(cfg, 'model'));
+    final modelOpts = _cfgList(cfg, 'model');
+    final curModel = _cfgCur(cfg, 'model');
+    final modelLabel = modelOpts
+            .firstWhere((o) => o['value'] == curModel,
+                orElse: () => <String, dynamic>{})
+            .let((m) => m['name']?.toString() ?? curModel);
+    final mode = _cfgCur(cfg, 'mode');
+
+    return SizedBox(
+      height: h * 0.86,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const SizedBox(height: 8),
+          Container(
+            width: 36,
+            height: 4,
+            margin: const EdgeInsets.only(bottom: 8),
+            decoration: BoxDecoration(
+              color: AppColors.keyCap,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 4, 12, 8),
+            child: Row(
               children: [
-                const Icon(AppIcons.terminal,
-                    size: 16, color: AppColors.reject),
+                const Icon(AppIcons.settings,
+                    size: 18, color: AppColors.textPrimary),
                 const SizedBox(width: 8),
-                const Expanded(
-                  child: Text('Bash · 删除构建产物', style: AppText.title2),
-                ),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: AppColors.rejectSoft,
-                    borderRadius: BorderRadius.circular(AppRadius.pill),
+                const Expanded(child: Text('设置', style: AppText.title1)),
+                Pressable(
+                  onTap: widget.onPalette,
+                  child: const SizedBox(
+                    width: 32,
+                    height: 32,
+                    child: Icon(AppIcons.palette,
+                        size: 18, color: AppColors.textSecondary),
                   ),
-                  child: Text('关键命令',
-                      style: AppText.monoCaption
-                          .copyWith(color: AppColors.reject)),
+                ),
+                Pressable(
+                  onTap: () => Navigator.of(context).pop(),
+                  child: const SizedBox(
+                    width: 32,
+                    height: 32,
+                    child: Icon(AppIcons.close,
+                        size: 18, color: AppColors.textSecondary),
+                  ),
                 ),
               ],
             ),
-            const SizedBox(height: AppSpacing.md),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(AppSpacing.md),
-              decoration: BoxDecoration(
-                color: AppColors.background,
-                borderRadius: BorderRadius.circular(AppRadius.thumbnail),
-              ),
-              child:
-                  const Text('rm -rf build/ && npm run deploy', style: AppText.mono),
-            ),
-            const SizedBox(height: AppSpacing.sm),
-            Pressable(
-              onTap: () => setState(() => _open = !_open),
-              child: Row(
-                children: [
-                  Icon(_open ? AppIcons.chevronDown : AppIcons.chevronRight,
-                      size: 13, color: AppColors.accent),
-                  const SizedBox(width: 5),
-                  Text('展开看完整上下文',
-                      style: AppText.callout.copyWith(color: AppColors.accent)),
-                ],
-              ),
-            ),
-            AnimatedSize(
-              duration: const Duration(milliseconds: 200),
-              curve: Curves.easeOut,
-              alignment: Alignment.topCenter,
-              child: _open
-                  ? Container(
-                      width: double.infinity,
-                      margin: const EdgeInsets.only(top: 8),
-                      padding: const EdgeInsets.all(AppSpacing.md),
-                      decoration: BoxDecoration(
-                        color: AppColors.background,
-                        border: Border.all(color: AppColors.hairline),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Text(
-                        '- 将删除 ./build 下 142 个文件\n'
-                        '- 随后向 prod 环境部署（不可逆）',
-                        style: AppText.monoCaption,
-                      ),
-                    )
-                  : const SizedBox.shrink(),
-            ),
-            const SizedBox(height: AppSpacing.sm),
-            const Text('Kimi 想清理旧 build 再部署——命中关键清单，需要你确认。',
-                style: AppText.caption),
-            const SizedBox(height: AppSpacing.md),
-            Row(
+          ),
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
               children: [
-                _Pill(
-                    label: '批准',
-                    bg: AppColors.approve,
-                    fg: AppColors.surface,
-                    onTap: widget.onApprove),
-                const SizedBox(width: AppSpacing.sm),
-                _Pill(
-                    label: '本会话',
-                    bg: AppColors.keyCap,
-                    fg: AppColors.textPrimary,
-                    onTap: widget.onApprove),
-                const SizedBox(width: AppSpacing.sm),
-                _Pill(
-                    label: '拒绝',
-                    bg: AppColors.rejectSoft,
-                    fg: AppColors.reject,
-                    onTap: widget.onReject),
+                _group('机器体检 · 只读'),
+                _ro('Provider', prov.isEmpty ? '—' : prov),
+                _ro('当前模型', modelLabel.isEmpty ? '—' : modelLabel),
+                _ro('当前模式', mode.isEmpty ? '—' : mode),
+                _ro('思考强度', '${widget.effortLabel}（会话级待接通）'),
+                const SizedBox(height: 22),
+                _group('连接'),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: AppColors.background,
+                    borderRadius: BorderRadius.circular(AppRadius.thumbnail),
+                  ),
+                  child: TextField(
+                    controller: _urlCtrl,
+                    style: AppText.monoCaption,
+                    decoration: const InputDecoration(
+                      isCollapsed: true,
+                      border: InputBorder.none,
+                      contentPadding: EdgeInsets.symmetric(vertical: 10),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Pressable(
+                    onTap: () => widget.onReconnect(_urlCtrl.text.trim()),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 9),
+                      decoration: BoxDecoration(
+                        color: AppColors.textPrimary,
+                        borderRadius: BorderRadius.circular(AppRadius.pill),
+                      ),
+                      child: Text('保存并重连',
+                          style: AppText.callout.copyWith(
+                              color: AppColors.surface,
+                              fontWeight: FontWeight.w600)),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                _StatusRow(
+                    label: '连接状态',
+                    ok: widget.store.relayState == 'ok' ||
+                        widget.store.relayState == 'connecting'),
+                const SizedBox(height: 22),
+                _group('锁屏门铃'),
+                _tg('Bark 推送', _barkOn, (v) => setState(() => _barkOn = v)),
+                _ro('Bark URL', 'https://api.day.app/••••'),
+                const SizedBox(height: 22),
+                _group('许可策略'),
+                _tg('非关键超时自动放行', _autoPass,
+                    (v) => setState(() => _autoPass = v)),
+                _ro('超时时长', '5 分钟'),
+                const SizedBox(height: 22),
+                _group('外观'),
+                _ro('主题', '浅色（v1）'),
+                const SizedBox(height: 22),
+                _group('关于'),
+                _ro('版本', 'v0.1.0'),
+                _ro('实测基线', 'Kimi Code CLI 0.31.0'),
               ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _group(String t) => Padding(
+        padding: const EdgeInsets.only(top: 4, bottom: 10),
+        child: Text(t, style: AppText.monoCaption),
+      );
+
+  Widget _ro(String k, String v) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 7),
+        child: Row(
+          children: [
+            Text(k, style: AppText.callout),
+            const Spacer(),
+            Flexible(
+              child: Text(v,
+                  style: AppText.caption,
+                  textAlign: TextAlign.right,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis),
+            ),
+          ],
+        ),
+      );
+
+  Widget _tg(String k, bool v, ValueChanged<bool> onChanged) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          children: [
+            Expanded(child: Text(k, style: AppText.callout)),
+            Switch(
+              value: v,
+              activeThumbColor: AppColors.accent,
+              onChanged: onChanged,
+            ),
+          ],
+        ),
+      );
+}
+
+class _StatusRow extends StatelessWidget {
+  final String label;
+  final bool ok;
+  const _StatusRow({required this.label, required this.ok});
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 7),
+      child: Row(
+        children: [
+          Text(label, style: AppText.callout),
+          const Spacer(),
+          Container(
+            width: 7,
+            height: 7,
+            decoration: BoxDecoration(
+              color: ok ? AppColors.approve : AppColors.reject,
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text(ok ? '在线' : '离线',
+              style: AppText.caption
+                  .copyWith(color: ok ? AppColors.approve : AppColors.reject)),
+        ],
+      ),
+    );
+  }
+}
+
+// ---------- 连接诚实横幅（§12：不诚实即一票否决）----------
+
+class _ConnBanner extends StatelessWidget {
+  final String state; // ok / degraded / offline / connecting
+  final DateTime? lastSyncedAt;
+  final VoidCallback onRetry;
+  const _ConnBanner({
+    required this.state,
+    required this.lastSyncedAt,
+    required this.onRetry,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (state == 'ok') return const SizedBox.shrink();
+
+    final never = lastSyncedAt == null;
+    final (color, icon, text) = switch (state) {
+      'connecting' => never
+          ? (AppColors.textSecondary, AppIcons.history, '连接中…')
+          : (AppColors.warning, AppIcons.history, '重连中…'),
+      'degraded' =>
+          (AppColors.warning, AppIcons.modeManual, 'Kimi 未响应 · 可重试拉起'),
+      'offline' => never
+          ? (AppColors.textSecondary, AppIcons.history, '连接中…')
+          : (AppColors.placeholder, AppIcons.close, '已断开 · 最后同步于 ${_hm(lastSyncedAt)}'),
+      _ => (AppColors.textSecondary, AppIcons.history, ''),
+    };
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(AppSpacing.pageMargin, 0, AppSpacing.pageMargin, 6),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(AppRadius.thumbnail),
+        boxShadow: AppShadows.input,
+      ),
+      child: Row(
+        children: [
+          if (state == 'connecting' || (state == 'offline' && never))
+            SizedBox(
+              width: 13,
+              height: 13,
+              child: CircularProgressIndicator(
+                  strokeWidth: 2, color: color),
+            )
+          else
+            Icon(icon, size: 14, color: color),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(text,
+                style: AppText.caption.copyWith(color: color),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis),
+          ),
+          if (state == 'degraded')
+            Pressable(
+              onTap: onRetry,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                decoration: BoxDecoration(
+                  color: AppColors.warning,
+                  borderRadius: BorderRadius.circular(AppRadius.pill),
+                ),
+                child: Text('重试',
+                    style: AppText.callout.copyWith(
+                        color: AppColors.surface,
+                        fontWeight: FontWeight.w600)),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  String _hm(DateTime? t) {
+    if (t == null) return '';
+    final h = t.hour.toString().padLeft(2, '0');
+    final m = t.minute.toString().padLeft(2, '0');
+    return '$h:$m';
+  }
+}
+
+// ---------- 多会话切换器（§11：单会话退场，多会话现身）----------
+
+class _SessionSwitcher extends StatelessWidget {
+  final SessionStore store;
+  final VoidCallback onOpenQueue;
+  const _SessionSwitcher({required this.store, required this.onOpenQueue});
+
+  @override
+  Widget build(BuildContext context) {
+    final sids = store.activeSids;
+    // 单会话退场：不暗示"该切换"。
+    if (sids.length < 2) return const SizedBox.shrink();
+    final cur = store.currentSid;
+    final pending = store.pendingCount;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 0, 8, 6),
+      child: Row(
+        children: [
+          Expanded(
+            child: SizedBox(
+              height: 34,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                itemCount: sids.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 6),
+                itemBuilder: (_, i) {
+                  final sid = sids[i];
+                  return _SessionTab(
+                    title: store.titleOf(sid),
+                    status: store.sessionStatus(sid),
+                    selected: sid == cur,
+                    onTap: () => store.setCurrent(sid),
+                  );
+                },
+              ),
+            ),
+          ),
+          if (pending > 0) ...[
+            const SizedBox(width: 6),
+            _PendingBadge(count: pending, onTap: onOpenQueue),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _SessionTab extends StatelessWidget {
+  final String title;
+  final String status; // pending / running / idle
+  final bool selected;
+  final VoidCallback onTap;
+  const _SessionTab({
+    required this.title,
+    required this.status,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final dotColor = switch (status) {
+      'pending' => AppColors.warning,
+      'running' => AppColors.approve,
+      _ => null,
+    };
+    return Pressable(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          color: selected ? AppColors.accentSoft : AppColors.keyCap,
+          borderRadius: BorderRadius.circular(AppRadius.pill),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (dotColor != null) ...[
+              Container(
+                width: 7,
+                height: 7,
+                decoration:
+                    BoxDecoration(color: dotColor, shape: BoxShape.circle),
+              ),
+              const SizedBox(width: 6),
+            ],
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 110),
+              child: Text(
+                title,
+                style: AppText.callout.copyWith(
+                  color: AppColors.textPrimary,
+                  fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
             ),
           ],
         ),
@@ -884,69 +1846,170 @@ class _ApprovalSheetState extends State<_ApprovalSheet> {
   }
 }
 
-class _Pill extends StatelessWidget {
-  final String label;
-  final Color bg;
-  final Color fg;
+/// 待批准角标：圆底 + 数字，点开进入队列视图。
+class _PendingBadge extends StatelessWidget {
+  final int count;
   final VoidCallback onTap;
-  const _Pill({
-    required this.label,
-    required this.bg,
-    required this.fg,
-    required this.onTap,
-  });
+  const _PendingBadge({required this.count, required this.onTap});
+
   @override
   Widget build(BuildContext context) {
-    return Expanded(
-      child: Pressable(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 10),
-          decoration: BoxDecoration(
-            color: bg,
-            borderRadius: BorderRadius.circular(AppRadius.pill),
-          ),
-          alignment: Alignment.center,
-          child: Text(label,
-              style: AppText.callout
-                  .copyWith(color: fg, fontWeight: FontWeight.w600)),
+    return Pressable(
+      onTap: onTap,
+      child: Container(
+        height: 34,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          color: AppColors.warning,
+          borderRadius: BorderRadius.circular(AppRadius.pill),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(AppIcons.bell, size: 14, color: AppColors.surface),
+            const SizedBox(width: 6),
+            Text('$count',
+                style: AppText.callout.copyWith(
+                    color: AppColors.surface, fontWeight: FontWeight.w700)),
+          ],
         ),
       ),
     );
   }
 }
 
-class _InputBar extends StatelessWidget {
-  const _InputBar();
+// ---------- 待批准队列全屏视图（§11：按 sid 分组）----------
+
+class _PendingQueuePage extends StatefulWidget {
+  final SessionStore store;
+  final RelayClient client;
+  final ValueChanged<String> onPickSession;
+  const _PendingQueuePage({
+    required this.store,
+    required this.client,
+    required this.onPickSession,
+  });
+
+  @override
+  State<_PendingQueuePage> createState() => _PendingQueuePageState();
+}
+
+class _PendingQueuePageState extends State<_PendingQueuePage> {
+  late VoidCallback _sub;
+
+  @override
+  void initState() {
+    super.initState();
+    _sub = () => setState(() {});
+    widget.store.addListener(_sub);
+  }
+
+  @override
+  void dispose() {
+    widget.store.removeListener(_sub);
+    super.dispose();
+  }
+
+  void _decide(String sid, PermissionRequest p, PermOption opt) {
+    widget.client.send('permission.decision',
+        sid: sid,
+        payload: {'permissionId': p.permissionId, 'optionId': opt.optionId});
+    widget.store.resolvePermission(p);
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(AppRadius.card),
-        boxShadow: AppShadows.input,
+    final all = widget.store.allPending;
+    final groups = all.entries.where((e) => e.value.isNotEmpty).toList();
+
+    return Scaffold(
+      backgroundColor: AppColors.background,
+      body: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 8, 12, 8),
+              child: Row(
+                children: [
+                  _iconBtn(AppIcons.arrowLeft,
+                      onTap: () => Navigator.of(context).pop()),
+                  const SizedBox(width: 4),
+                  const Expanded(child: Text('待批准队列', style: AppText.title1)),
+                  Text('${widget.store.pendingCount} 条',
+                      style: AppText.caption),
+                ],
+              ),
+            ),
+            Expanded(
+              child: groups.isEmpty
+                  ? Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const _DotMatrix(),
+                          const SizedBox(height: AppSpacing.xl),
+                          Text('没有等待你的批准',
+                              style: AppText.body
+                                  .copyWith(color: AppColors.textSecondary)),
+                        ],
+                      ),
+                    )
+                  : ListView(
+                      padding: const EdgeInsets.fromLTRB(
+                          AppSpacing.pageMargin, 4, AppSpacing.pageMargin, 24),
+                      children: [
+                        for (final g in groups) ...[
+                          Padding(
+                            padding:
+                                const EdgeInsets.fromLTRB(4, 12, 4, 8),
+                            child: Row(
+                              children: [
+                                const Icon(AppIcons.folder,
+                                    size: 14, color: AppColors.textSecondary),
+                                const SizedBox(width: 6),
+                                Expanded(
+                                  child: Text(widget.store.titleOf(g.key),
+                                      style: AppText.callout.copyWith(
+                                          fontWeight: FontWeight.w600),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis),
+                                ),
+                                Pressable(
+                                  onTap: () =>
+                                      widget.onPickSession(g.key),
+                                  child: Text('切到该会话',
+                                      style: AppText.caption.copyWith(
+                                          color: AppColors.accent)),
+                                ),
+                              ],
+                            ),
+                          ),
+                          for (final p in g.value)
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 10),
+                              child: _PermSheet(
+                                perm: p,
+                                onDecide: (opt) => _decide(g.key, p, opt),
+                              ),
+                            ),
+                        ],
+                      ],
+                    ),
+            ),
+          ],
+        ),
       ),
-      child: Row(
-        children: [
-          Container(
-            width: 32,
-            height: 32,
-            decoration:
-                const BoxDecoration(color: AppColors.keyCap, shape: BoxShape.circle),
-            child:
-                const Icon(AppIcons.plus, size: 18, color: AppColors.textSecondary),
-          ),
-          const SizedBox(width: AppSpacing.md),
-          const Expanded(child: Text('尽管问…', style: AppText.placeholder)),
-          Container(
-            width: 32,
-            height: 32,
-            decoration: const BoxDecoration(
-                color: AppColors.textPrimary, shape: BoxShape.circle),
-            child: const Icon(AppIcons.send, size: 16, color: AppColors.surface),
-          ),
-        ],
+    );
+  }
+
+  Widget _iconBtn(IconData icon, {VoidCallback? onTap}) {
+    return Pressable(
+      onTap: onTap ?? () {},
+      child: SizedBox(
+        width: 36,
+        height: 36,
+        child: Icon(icon, size: 20, color: AppColors.textPrimary),
       ),
     );
   }

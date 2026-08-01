@@ -5,7 +5,7 @@ import '../theme/app_dimens.dart';
 import '../theme/app_shadows.dart';
 import '../theme/app_icons.dart';
 
-/// 按压反馈：轻量透明度变化，克制、无水波纹。
+/// 按压反馈：轻量透明度变化。
 class Pressable extends StatefulWidget {
   final Widget child;
   final VoidCallback onTap;
@@ -34,7 +34,7 @@ class _PressableState extends State<Pressable> {
   }
 }
 
-/// 在线指示点：轻量呼吸，表示"活着"（功能含义，非装饰）。
+/// 在线指示点：轻量呼吸。
 class BreathingDot extends StatefulWidget {
   final Color color;
   const BreathingDot({super.key, required this.color});
@@ -69,32 +69,40 @@ class _BreathingDotState extends State<BreathingDot>
   }
 }
 
-/// 下拉菜单的一个选项。
+/// 下拉选项。subtitle 为可选副标题。
 class DropdownOption {
   final String id;
   final String label;
+  final String? subtitle;
   final IconData? icon;
-  const DropdownOption({required this.id, required this.label, this.icon});
+  const DropdownOption({
+    required this.id,
+    required this.label,
+    this.subtitle,
+    this.icon,
+  });
 }
 
-/// 通用下拉触发器：胶囊触发器 + Overlay 垂直菜单（单选枚举的标准形态）。
-/// 受控组件：selectedId / onSelect 由外部持有。accent 仅在弹开做选择时出现。
+/// 通用下拉：胶囊触发器（文字+箭头，窄屏自动截断）+ Overlay 垂直菜单。受控。
+/// 选中态遵循规范 1.3：文字黑、功能图标灰、仅勾为 accent。
 class ChipDropdown extends StatefulWidget {
-  final IconData triggerIcon;
+  final IconData? triggerIcon;
   final String triggerLabel;
   final List<DropdownOption> options;
   final String selectedId;
   final ValueChanged<String> onSelect;
   final double minWidth;
+  final bool wide;
 
   const ChipDropdown({
     super.key,
-    required this.triggerIcon,
+    this.triggerIcon,
     required this.triggerLabel,
     required this.options,
     required this.selectedId,
     required this.onSelect,
-    this.minWidth = 140,
+    this.minWidth = 80,
+    this.wide = false,
   });
 
   @override
@@ -103,6 +111,7 @@ class ChipDropdown extends StatefulWidget {
 
 class _ChipDropdownState extends State<ChipDropdown> {
   OverlayEntry? _entry;
+  bool _triggerDown = false;
   bool get _open => _entry != null;
 
   void _toggle() => _open ? _close() : _openMenu();
@@ -112,7 +121,7 @@ class _ChipDropdownState extends State<ChipDropdown> {
     final off = box.localToGlobal(Offset.zero);
     final w = box.size.width;
     _entry = OverlayEntry(
-      builder: (_) => Stack(
+      builder: (ctx) => Stack(
         children: [
           Positioned.fill(
             child: GestureDetector(
@@ -121,69 +130,49 @@ class _ChipDropdownState extends State<ChipDropdown> {
               child: const SizedBox.shrink(),
             ),
           ),
-          Positioned(
-            top: off.dy + box.size.height + 6,
-            left: off.dx,
-            width: w < widget.minWidth ? widget.minWidth : w,
-            child: Container(
-              decoration: BoxDecoration(
-                color: AppColors.surface,
-                borderRadius: BorderRadius.circular(AppRadius.thumbnail),
-                boxShadow: AppShadows.popup,
-              ),
-              padding: const EdgeInsets.symmetric(vertical: 6),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: widget.options.map((o) {
-                  final sel = o.id == widget.selectedId;
-                  return Pressable(
-                    onTap: () {
-                      widget.onSelect(o.id);
-                      _close();
-                    },
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 9,
-                      ),
-                      child: Row(
-                        children: [
-                          if (o.icon != null) ...[
-                            Icon(o.icon,
-                                size: 15,
-                                color: sel
-                                    ? AppColors.accent
-                                    : AppColors.textSecondary),
-                            const SizedBox(width: 10),
-                          ],
-                          Expanded(
-                            child: Text(
-                              o.label,
-                              style: AppText.callout.copyWith(
-                                color: sel
-                                    ? AppColors.accent
-                                    : AppColors.textPrimary,
-                                fontWeight:
-                                    sel ? FontWeight.w600 : FontWeight.w400,
-                              ),
-                            ),
-                          ),
-                          if (sel)
-                            const Icon(AppIcons.check,
-                                size: 14, color: AppColors.accent),
-                        ],
-                      ),
-                    ),
-                  );
-                }).toList(),
-              ),
-            ),
-          ),
+          widget.wide
+              ? Positioned(
+                  top: off.dy + box.size.height + 6,
+                  left: AppSpacing.pageMargin,
+                  right: AppSpacing.pageMargin,
+                  child: _menu(),
+                )
+              : Positioned(
+                  top: off.dy + box.size.height + 6,
+                  left: off.dx,
+                  width: w < widget.minWidth ? widget.minWidth : w,
+                  child: _menu(),
+                ),
         ],
       ),
     );
     Overlay.of(context).insert(_entry!);
     setState(() {});
+  }
+
+  Widget _menu() {
+    return Container(
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(AppRadius.card),
+        boxShadow: AppShadows.popup,
+      ),
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: widget.options
+            .map((o) => _DropdownItem(
+                  option: o,
+                  selected: o.id == widget.selectedId,
+                  onTap: () {
+                    widget.onSelect(o.id);
+                    _close();
+                  },
+                ))
+            .toList(),
+      ),
+    );
   }
 
   void _close() {
@@ -200,27 +189,113 @@ class _ChipDropdownState extends State<ChipDropdown> {
 
   @override
   Widget build(BuildContext context) {
-    return Pressable(
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTapDown: (_) => setState(() => _triggerDown = true),
+      onTapUp: (_) => setState(() => _triggerDown = false),
+      onTapCancel: () => setState(() => _triggerDown = false),
       onTap: _toggle,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 120),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
-          color: AppColors.keyCap,
+          color: _triggerDown ? const Color(0xFFDADAE0) : AppColors.keyCap,
           borderRadius: BorderRadius.circular(AppRadius.pill),
         ),
+        // 触发器文字用 Flexible+ellipsis，窄屏被外层 Flexible 约束时截断。
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(widget.triggerIcon, size: 12, color: AppColors.textSecondary),
-            const SizedBox(width: 5),
-            Text(widget.triggerLabel,
-                style: AppText.caption.copyWith(color: AppColors.textPrimary)),
-            const SizedBox(width: 3),
+            if (widget.triggerIcon != null) ...[
+              Icon(widget.triggerIcon, size: 12, color: AppColors.textSecondary),
+              const SizedBox(width: 5),
+            ],
+            Flexible(
+              child: Text(
+                widget.triggerLabel,
+                style: AppText.callout.copyWith(color: AppColors.textPrimary),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            const SizedBox(width: 4),
             Icon(
               _open ? AppIcons.chevronUp : AppIcons.chevronDown,
               size: 12,
               color: AppColors.textSecondary,
             ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 下拉选项行：选中 = 黑字 + 灰图标 + 蓝勾（规范 1.3）。
+class _DropdownItem extends StatefulWidget {
+  final DropdownOption option;
+  final bool selected;
+  final VoidCallback onTap;
+  const _DropdownItem({
+    required this.option,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  State<_DropdownItem> createState() => _DropdownItemState();
+}
+
+class _DropdownItemState extends State<_DropdownItem> {
+  bool _down = false;
+  @override
+  Widget build(BuildContext context) {
+    final hasSub = widget.option.subtitle != null;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTapDown: (_) => setState(() => _down = true),
+      onTapUp: (_) => setState(() => _down = false),
+      onTapCancel: () => setState(() => _down = false),
+      onTap: widget.onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 110),
+        margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: _down ? AppColors.keyCap : Colors.transparent,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            if (widget.option.icon != null) ...[
+              Icon(widget.option.icon, size: 16, color: AppColors.textSecondary),
+              const SizedBox(width: 10),
+            ],
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    widget.option.label,
+                    style: AppText.body.copyWith(
+                      color: AppColors.textPrimary,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  if (hasSub) ...[
+                    const SizedBox(height: 2),
+                    Text(widget.option.subtitle!, style: AppText.caption),
+                  ],
+                ],
+              ),
+            ),
+            if (widget.selected)
+              const Padding(
+                padding: EdgeInsets.only(left: 10),
+                child: Icon(AppIcons.check, size: 16, color: AppColors.accent),
+              ),
           ],
         ),
       ),

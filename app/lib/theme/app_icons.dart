@@ -10,13 +10,17 @@ abstract final class AppIcons {
   static const IconData plus = LucideIcons.plus;
   static const IconData close = LucideIcons.x;
   static const IconData history = LucideIcons.history;
+  static const IconData arrowLeft = LucideIcons.arrow_left;
   static const IconData chevronRight = LucideIcons.chevron_right;
   static const IconData chevronDown = LucideIcons.chevron_down;
   static const IconData chevronUp = LucideIcons.chevron_up;
   static const IconData palette = LucideIcons.palette; // 开发期跳 showcase
   static const IconData folder = LucideIcons.folder; // 工作区分组
   static const IconData modelChip = LucideIcons.cpu; // 模型选择触发器
-
+  static const IconData thinking = LucideIcons.sparkles; // 思考强度
+  static const IconData command = LucideIcons.command; // slash 命令菜单
+  static const IconData search = LucideIcons.search; // 抽屉搜索
+  
   // 会话模式（哨兵在不在场）
   static const IconData modeManual = LucideIcons.shield;
   static const IconData modePlan = LucideIcons.eye;
