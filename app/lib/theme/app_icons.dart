@@ -10,6 +10,7 @@ abstract final class AppIcons {
   static const IconData plus = LucideIcons.plus;
   static const IconData close = LucideIcons.x;
   static const IconData history = LucideIcons.history;
+  static const IconData arrowLeft = LucideIcons.arrow_left;
   static const IconData chevronRight = LucideIcons.chevron_right;
   static const IconData chevronDown = LucideIcons.chevron_down;
   static const IconData chevronUp = LucideIcons.chevron_up;

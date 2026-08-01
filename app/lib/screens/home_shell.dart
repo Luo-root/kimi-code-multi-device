@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../relay/models.dart';
 import '../relay/relay_client.dart';
@@ -88,14 +89,13 @@ class _HomeShellState extends State<HomeShell> {
   String _effortId = 'medium'; // 占位
   String? _slashQuery;
 
-  bool get _online => _client.connected;
-
   @override
   void initState() {
     super.initState();
     _client.onMessage = _store.handle;
-    _client.onOpen = () => setState(() {});
-    _client.onClose = () => setState(() {});
+    _client.onOpen = () => _store.markConnected();
+    _client.onClose = () => _store.markDisconnected(reconnecting: true);
+    _client.onReconnecting = () => _store.markDisconnected(reconnecting: true);
     _store.addListener(_onStore);
     _connect(_relayUrl);
   }
@@ -115,11 +115,14 @@ class _HomeShellState extends State<HomeShell> {
 
   Future<void> _connect(String url) async {
     _relayUrl = url;
-    try {
-      await _client.connect(url);
-    } catch (_) {
-      setState(() {});
-    }
+    // RelayClient 自带退避重连，此处只发起首次连接；失败由 onReconnecting 接管。
+    await _client.connect(url);
+  }
+
+  void _cancelCurrent() {
+    final sid = _store.currentSid;
+    if (sid == null) return;
+    _client.send('cancel', sid: sid);
   }
 
   // ---- 顶栏选择回调：下发 + 乐观更新 ----
@@ -157,7 +160,7 @@ class _HomeShellState extends State<HomeShell> {
   void _send(String text) {
     final t = text.trim();
     final sid = _store.currentSid;
-    if (t.isEmpty || sid == null || !_online) return;
+    if (t.isEmpty || sid == null || _store.relayState != 'ok') return;
     _store.addUser(sid, t);
     _client.send('prompt', sid: sid, payload: {'text': t});
     _inputCtrl.clear();
@@ -201,12 +204,12 @@ class _HomeShellState extends State<HomeShell> {
   void _newSession() => _client.send('new_session', payload: {});
 
   void _decide(PermOption opt) {
-    final p = _store.pendingPermission;
+    final p = _store.pendingOf(_store.currentSid);
     if (p == null) return;
     _client.send('permission.decision',
         sid: p.sid,
         payload: {'permissionId': p.permissionId, 'optionId': opt.optionId});
-    setState(() => _store.pendingPermission = null);
+    _store.resolvePermission(p);
   }
 
   void _openSettings() => showModalBottomSheet(
@@ -234,6 +237,22 @@ class _HomeShellState extends State<HomeShell> {
         ),
       );
 
+  /// 待批准队列：全屏列出所有会话的待批准卡，按 sid 分组。
+  void _openQueue() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => _PendingQueuePage(
+          store: _store,
+          client: _client,
+          onPickSession: (sid) {
+            _store.setCurrent(sid);
+            Navigator.of(context).pop();
+          },
+        ),
+      ),
+    );
+  }
+
   @override
   void dispose() {
     _client.disconnect();
@@ -248,7 +267,7 @@ class _HomeShellState extends State<HomeShell> {
     final sid = _store.currentSid;
     final cfg = _store.configOf(sid);
     final blocks = _store.blocksOf(sid);
-    final perm = _store.pendingPermission;
+    final perm = _store.pendingOf(sid);
 
     final slashOpen = _slashQuery != null;
     final cmds = _store.commandsOf(sid);
@@ -261,6 +280,7 @@ class _HomeShellState extends State<HomeShell> {
             .toList();
 
     final dockH = perm != null ? 360.0 : (slashOpen ? 230.0 : 150.0);
+    final running = sid != null && _store.sessionStatus(sid) == 'running';
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -290,7 +310,6 @@ class _HomeShellState extends State<HomeShell> {
             _TopBar(
               cfg: cfg,
               effortId: _effortId,
-              online: _online,
               relayState: _store.relayState,
               onProvider: _onProvider,
               onModel: _onModel,
@@ -300,12 +319,21 @@ class _HomeShellState extends State<HomeShell> {
                 MaterialPageRoute(builder: (_) => const DesignShowcase()),
               ),
             ),
+            _SessionSwitcher(
+              store: _store,
+              onOpenQueue: _openQueue,
+            ),
+            _ConnBanner(
+              state: _store.relayState,
+              lastSyncedAt: _store.lastSyncedAt,
+              onRetry: () => _client.send('restart_kimi'),
+            ),
             Expanded(
               child: Stack(
                 clipBehavior: Clip.none,
                 children: [
                   blocks.isEmpty
-                      ? _EmptyState(online: _online)
+                      ? _EmptyState(online: _store.relayState == 'ok')
                       : ListView.builder(
                           controller: _scrollCtrl,
                           padding: EdgeInsets.fromLTRB(
@@ -327,10 +355,12 @@ class _HomeShellState extends State<HomeShell> {
                     right: 0,
                     bottom: 0,
                     child: _BottomDock(
-                      enabled: _online && sid != null,
+                      enabled: _store.relayState == 'ok' && sid != null,
+                      running: running,
                       pending: perm,
                       controller: _inputCtrl,
                       onSend: _send,
+                      onStop: _cancelCurrent,
                       onChanged: _onInputChanged,
                       onOpenPlus: _onAttach,
                       onChip: _send,
@@ -355,7 +385,6 @@ class _HomeShellState extends State<HomeShell> {
 class _TopBar extends StatelessWidget {
   final dynamic cfg;
   final String effortId;
-  final bool online;
   final String relayState;
   final ValueChanged<String> onProvider;
   final ValueChanged<String> onModel;
@@ -366,7 +395,6 @@ class _TopBar extends StatelessWidget {
   const _TopBar({
     required this.cfg,
     required this.effortId,
-    required this.online,
     required this.relayState,
     required this.onProvider,
     required this.onModel,
@@ -390,9 +418,11 @@ class _TopBar extends StatelessWidget {
                 orElse: () => <String, dynamic>{})
             .let((m) => (m['name']?.toString() ?? curModel));
 
-    final dot = online
-        ? (relayState == 'degraded' ? AppColors.warning : AppColors.approve)
-        : AppColors.placeholder;
+    final dot = switch (relayState) {
+      'ok' => AppColors.approve,
+      'degraded' => AppColors.warning,
+      _ => AppColors.placeholder,
+    };
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(8, 10, 8, 10),
@@ -940,9 +970,11 @@ class _DotMatrix extends StatelessWidget {
 
 class _BottomDock extends StatelessWidget {
   final bool enabled;
+  final bool running;
   final PermissionRequest? pending;
   final TextEditingController controller;
   final ValueChanged<String> onSend;
+  final VoidCallback onStop;
   final ValueChanged<String> onChanged;
   final VoidCallback onOpenPlus;
   final ValueChanged<String> onChip;
@@ -953,9 +985,11 @@ class _BottomDock extends StatelessWidget {
 
   const _BottomDock({
     required this.enabled,
+    required this.running,
     required this.pending,
     required this.controller,
     required this.onSend,
+    required this.onStop,
     required this.onChanged,
     required this.onOpenPlus,
     required this.onChip,
@@ -1034,8 +1068,10 @@ class _BottomDock extends StatelessWidget {
                     const EdgeInsets.symmetric(horizontal: AppSpacing.pageMargin),
                 child: _InputBar(
                   enabled: enabled,
+                  running: running,
                   controller: controller,
                   onSend: onSend,
+                  onStop: onStop,
                   onChanged: onChanged,
                   onOpenPlus: onOpenPlus,
                 ),
@@ -1093,14 +1129,18 @@ class _SlashPanel extends StatelessWidget {
 
 class _InputBar extends StatelessWidget {
   final bool enabled;
+  final bool running;
   final TextEditingController controller;
   final ValueChanged<String> onSend;
+  final VoidCallback onStop;
   final ValueChanged<String> onChanged;
   final VoidCallback onOpenPlus;
   const _InputBar({
     required this.enabled,
+    required this.running,
     required this.controller,
     required this.onSend,
+    required this.onStop,
     required this.onChanged,
     required this.onOpenPlus,
   });
@@ -1146,20 +1186,36 @@ class _InputBar extends StatelessWidget {
             ),
           ),
           const SizedBox(width: AppSpacing.sm),
-          Pressable(
-            onTap: enabled ? () => onSend(controller.text) : () {},
-            child: Container(
-              width: 32,
-              height: 32,
-              decoration: BoxDecoration(
-                color: enabled ? AppColors.textPrimary : AppColors.keyCap,
-                shape: BoxShape.circle,
-              ),
-              child: Icon(AppIcons.send,
-                  size: 16,
-                  color: enabled ? AppColors.surface : AppColors.placeholder),
-            ),
-          ),
+          // §13「停」可见性随状态：流式中亮且显眼（占发送位），空闲时是发送。
+          running
+              ? Pressable(
+                  onTap: onStop,
+                  child: Container(
+                    width: 32,
+                    height: 32,
+                    decoration: const BoxDecoration(
+                      color: AppColors.reject,
+                      shape: BoxShape.circle,
+                    ),
+                    child:
+                        const Icon(AppIcons.stop, size: 14, color: AppColors.surface),
+                  ),
+                )
+              : Pressable(
+                  onTap: enabled ? () => onSend(controller.text) : () {},
+                  child: Container(
+                    width: 32,
+                    height: 32,
+                    decoration: BoxDecoration(
+                      color: enabled ? AppColors.textPrimary : AppColors.keyCap,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(AppIcons.send,
+                        size: 16,
+                        color:
+                            enabled ? AppColors.surface : AppColors.placeholder),
+                  ),
+                ),
         ],
       ),
     );
@@ -1168,68 +1224,177 @@ class _InputBar extends StatelessWidget {
 
 // ---------- 批准浮层（真实 permission）----------
 
-class _PermSheet extends StatelessWidget {
+/// 批准卡超时兜底（中继未给 deadline 时用）。与中继默认阈值对齐。
+const _kDefaultPermTimeout = Duration(minutes: 5);
+
+class _PermSheet extends StatefulWidget {
   final PermissionRequest perm;
   final ValueChanged<PermOption> onDecide;
   const _PermSheet({required this.perm, required this.onDecide});
 
   @override
+  State<_PermSheet> createState() => _PermSheetState();
+}
+
+class _PermSheetState extends State<_PermSheet> {
+  bool _expanded = false;
+  late final DateTime _deadline;
+  Timer? _t;
+  Duration _remaining = Duration.zero;
+
+  @override
+  void initState() {
+    super.initState();
+    _deadline = widget.perm.deadline ??
+        DateTime.now().add(_kDefaultPermTimeout);
+    _tick();
+    _t = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) _tick();
+    });
+  }
+
+  @override
+  void dispose() {
+    _t?.cancel();
+    super.dispose();
+  }
+
+  void _tick() {
+    _remaining = _deadline.difference(DateTime.now());
+    if (_remaining.isNegative) _remaining = Duration.zero;
+    setState(() {});
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final p = widget.perm;
+    final critical = isCriticalCommand(p.command);
+    final barColor = critical ? AppColors.reject : AppColors.textSecondary;
+
     return Container(
       decoration: BoxDecoration(
         color: AppColors.surface,
         borderRadius: BorderRadius.circular(AppRadius.card),
         boxShadow: AppShadows.card,
-        border: Border.all(color: AppColors.warning, width: 1),
       ),
-      child: Padding(
-        padding: const EdgeInsets.all(AppSpacing.lg),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+      child: IntrinsicHeight(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Row(
-              children: [
-                const Icon(AppIcons.terminal, size: 16, color: AppColors.warning),
-                const SizedBox(width: 8),
-                Expanded(child: Text(perm.title, style: AppText.title2)),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: AppColors.warningSoft,
-                    borderRadius: BorderRadius.circular(AppRadius.pill),
-                  ),
-                  child: Text('待批准',
-                      style: AppText.monoCaption
-                          .copyWith(color: AppColors.warning)),
+            // §UI规范五：左侧 3px 语义色条（关键=红，普通=中性）。
+            Container(
+              width: 3,
+              decoration: BoxDecoration(
+                color: barColor,
+                borderRadius: const BorderRadius.only(
+                  topLeft: Radius.circular(AppRadius.card),
+                  bottomLeft: Radius.circular(AppRadius.card),
                 ),
-              ],
-            ),
-            if (perm.command.isNotEmpty) ...[
-              const SizedBox(height: AppSpacing.md),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(AppSpacing.md),
-                decoration: BoxDecoration(
-                  color: AppColors.background,
-                  borderRadius: BorderRadius.circular(AppRadius.thumbnail),
-                ),
-                child: Text(perm.command, style: AppText.mono),
               ),
-            ],
-            const SizedBox(height: AppSpacing.md),
-            Row(
-              children: [
-                for (final opt in perm.options) ...[
-                  Expanded(child: _permBtn(opt)),
-                  if (opt != perm.options.last)
-                    const SizedBox(width: AppSpacing.sm),
-                ],
-              ],
+            ),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.all(AppSpacing.lg),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(AppIcons.terminal, size: 16, color: barColor),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text(p.title, style: AppText.title2)),
+                        _countdownChip(critical),
+                        const SizedBox(width: 6),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: AppColors.warningSoft,
+                            borderRadius:
+                                BorderRadius.circular(AppRadius.pill),
+                          ),
+                          child: Text('待批准',
+                              style: AppText.monoCaption
+                                  .copyWith(color: AppColors.warning)),
+                        ),
+                      ],
+                    ),
+                    if (p.command.isNotEmpty) ...[
+                      const SizedBox(height: AppSpacing.md),
+                      _commandBox(p.command),
+                    ],
+                    const SizedBox(height: AppSpacing.md),
+                    Row(
+                      children: [
+                        for (final opt in p.options) ...[
+                          Expanded(child: _permBtn(opt)),
+                          if (opt != p.options.last)
+                            const SizedBox(width: AppSpacing.sm),
+                        ],
+                      ],
+                    ),
+                  ],
+                ),
+              ),
             ),
           ],
         ),
       ),
+    );
+  }
+
+  /// §10 3.1 命令原文：单行截断，全文靠展开。§3.3 展开是一次免费窥探，不触发 outcome。
+  Widget _commandBox(String cmd) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => setState(() => _expanded = !_expanded),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(AppSpacing.md),
+        decoration: BoxDecoration(
+          color: AppColors.background,
+          borderRadius: BorderRadius.circular(AppRadius.thumbnail),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: Text(
+                cmd,
+                style: AppText.mono,
+                maxLines: _expanded ? null : 1,
+                overflow: _expanded ? null : TextOverflow.ellipsis,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Icon(
+              _expanded ? AppIcons.chevronDown : AppIcons.chevronRight,
+              size: 14,
+              color: AppColors.textSecondary,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _countdownChip(bool critical) {
+    final m = _remaining.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = _remaining.inSeconds.remainder(60).toString().padLeft(2, '0');
+    final out = _remaining == Duration.zero;
+    final color = out
+        ? AppColors.reject
+        : (critical || _remaining.inSeconds < 60
+            ? AppColors.reject
+            : AppColors.textSecondary);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(AppRadius.pill),
+      ),
+      child: Text(out ? '已超时' : '$m:$s',
+          style: AppText.monoCaption.copyWith(color: color)),
     );
   }
 
@@ -1241,7 +1406,7 @@ class _PermSheet extends StatelessWidget {
       _ => (AppColors.keyCap, AppColors.textPrimary, opt.name ?? opt.optionId),
     };
     return Pressable(
-      onTap: () => onDecide(opt),
+      onTap: () => widget.onDecide(opt),
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 10),
         decoration: BoxDecoration(
@@ -1451,7 +1616,7 @@ class _SettingsSheetState extends State<_SettingsSheet> {
             Expanded(child: Text(k, style: AppText.callout)),
             Switch(
               value: v,
-              activeColor: AppColors.accent,
+              activeThumbColor: AppColors.accent,
               onChanged: onChanged,
             ),
           ],
@@ -1484,6 +1649,367 @@ class _StatusRow extends StatelessWidget {
               style: AppText.caption
                   .copyWith(color: ok ? AppColors.approve : AppColors.reject)),
         ],
+      ),
+    );
+  }
+}
+
+// ---------- 连接诚实横幅（§12：不诚实即一票否决）----------
+
+class _ConnBanner extends StatelessWidget {
+  final String state; // ok / degraded / offline / connecting
+  final DateTime? lastSyncedAt;
+  final VoidCallback onRetry;
+  const _ConnBanner({
+    required this.state,
+    required this.lastSyncedAt,
+    required this.onRetry,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (state == 'ok') return const SizedBox.shrink();
+
+    final never = lastSyncedAt == null;
+    final (color, icon, text) = switch (state) {
+      'connecting' => never
+          ? (AppColors.textSecondary, AppIcons.history, '连接中…')
+          : (AppColors.warning, AppIcons.history, '重连中…'),
+      'degraded' =>
+          (AppColors.warning, AppIcons.modeManual, 'Kimi 未响应 · 可重试拉起'),
+      'offline' => never
+          ? (AppColors.textSecondary, AppIcons.history, '连接中…')
+          : (AppColors.placeholder, AppIcons.close, '已断开 · 最后同步于 ${_hm(lastSyncedAt)}'),
+      _ => (AppColors.textSecondary, AppIcons.history, ''),
+    };
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(AppSpacing.pageMargin, 0, AppSpacing.pageMargin, 6),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(AppRadius.thumbnail),
+        boxShadow: AppShadows.input,
+      ),
+      child: Row(
+        children: [
+          if (state == 'connecting' || (state == 'offline' && never))
+            SizedBox(
+              width: 13,
+              height: 13,
+              child: CircularProgressIndicator(
+                  strokeWidth: 2, color: color),
+            )
+          else
+            Icon(icon, size: 14, color: color),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(text,
+                style: AppText.caption.copyWith(color: color),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis),
+          ),
+          if (state == 'degraded')
+            Pressable(
+              onTap: onRetry,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                decoration: BoxDecoration(
+                  color: AppColors.warning,
+                  borderRadius: BorderRadius.circular(AppRadius.pill),
+                ),
+                child: Text('重试',
+                    style: AppText.callout.copyWith(
+                        color: AppColors.surface,
+                        fontWeight: FontWeight.w600)),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  String _hm(DateTime? t) {
+    if (t == null) return '';
+    final h = t.hour.toString().padLeft(2, '0');
+    final m = t.minute.toString().padLeft(2, '0');
+    return '$h:$m';
+  }
+}
+
+// ---------- 多会话切换器（§11：单会话退场，多会话现身）----------
+
+class _SessionSwitcher extends StatelessWidget {
+  final SessionStore store;
+  final VoidCallback onOpenQueue;
+  const _SessionSwitcher({required this.store, required this.onOpenQueue});
+
+  @override
+  Widget build(BuildContext context) {
+    final sids = store.activeSids;
+    // 单会话退场：不暗示"该切换"。
+    if (sids.length < 2) return const SizedBox.shrink();
+    final cur = store.currentSid;
+    final pending = store.pendingCount;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 0, 8, 6),
+      child: Row(
+        children: [
+          Expanded(
+            child: SizedBox(
+              height: 34,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                itemCount: sids.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 6),
+                itemBuilder: (_, i) {
+                  final sid = sids[i];
+                  return _SessionTab(
+                    title: store.titleOf(sid),
+                    status: store.sessionStatus(sid),
+                    selected: sid == cur,
+                    onTap: () => store.setCurrent(sid),
+                  );
+                },
+              ),
+            ),
+          ),
+          if (pending > 0) ...[
+            const SizedBox(width: 6),
+            _PendingBadge(count: pending, onTap: onOpenQueue),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _SessionTab extends StatelessWidget {
+  final String title;
+  final String status; // pending / running / idle
+  final bool selected;
+  final VoidCallback onTap;
+  const _SessionTab({
+    required this.title,
+    required this.status,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final dotColor = switch (status) {
+      'pending' => AppColors.warning,
+      'running' => AppColors.approve,
+      _ => null,
+    };
+    return Pressable(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          color: selected ? AppColors.accentSoft : AppColors.keyCap,
+          borderRadius: BorderRadius.circular(AppRadius.pill),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (dotColor != null) ...[
+              Container(
+                width: 7,
+                height: 7,
+                decoration:
+                    BoxDecoration(color: dotColor, shape: BoxShape.circle),
+              ),
+              const SizedBox(width: 6),
+            ],
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 110),
+              child: Text(
+                title,
+                style: AppText.callout.copyWith(
+                  color: AppColors.textPrimary,
+                  fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 待批准角标：圆底 + 数字，点开进入队列视图。
+class _PendingBadge extends StatelessWidget {
+  final int count;
+  final VoidCallback onTap;
+  const _PendingBadge({required this.count, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Pressable(
+      onTap: onTap,
+      child: Container(
+        height: 34,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          color: AppColors.warning,
+          borderRadius: BorderRadius.circular(AppRadius.pill),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(AppIcons.bell, size: 14, color: AppColors.surface),
+            const SizedBox(width: 6),
+            Text('$count',
+                style: AppText.callout.copyWith(
+                    color: AppColors.surface, fontWeight: FontWeight.w700)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ---------- 待批准队列全屏视图（§11：按 sid 分组）----------
+
+class _PendingQueuePage extends StatefulWidget {
+  final SessionStore store;
+  final RelayClient client;
+  final ValueChanged<String> onPickSession;
+  const _PendingQueuePage({
+    required this.store,
+    required this.client,
+    required this.onPickSession,
+  });
+
+  @override
+  State<_PendingQueuePage> createState() => _PendingQueuePageState();
+}
+
+class _PendingQueuePageState extends State<_PendingQueuePage> {
+  late VoidCallback _sub;
+
+  @override
+  void initState() {
+    super.initState();
+    _sub = () => setState(() {});
+    widget.store.addListener(_sub);
+  }
+
+  @override
+  void dispose() {
+    widget.store.removeListener(_sub);
+    super.dispose();
+  }
+
+  void _decide(String sid, PermissionRequest p, PermOption opt) {
+    widget.client.send('permission.decision',
+        sid: sid,
+        payload: {'permissionId': p.permissionId, 'optionId': opt.optionId});
+    widget.store.resolvePermission(p);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final all = widget.store.allPending;
+    final groups = all.entries.where((e) => e.value.isNotEmpty).toList();
+
+    return Scaffold(
+      backgroundColor: AppColors.background,
+      body: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 8, 12, 8),
+              child: Row(
+                children: [
+                  _iconBtn(AppIcons.arrowLeft,
+                      onTap: () => Navigator.of(context).pop()),
+                  const SizedBox(width: 4),
+                  const Expanded(child: Text('待批准队列', style: AppText.title1)),
+                  Text('${widget.store.pendingCount} 条',
+                      style: AppText.caption),
+                ],
+              ),
+            ),
+            Expanded(
+              child: groups.isEmpty
+                  ? Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const _DotMatrix(),
+                          const SizedBox(height: AppSpacing.xl),
+                          Text('没有等待你的批准',
+                              style: AppText.body
+                                  .copyWith(color: AppColors.textSecondary)),
+                        ],
+                      ),
+                    )
+                  : ListView(
+                      padding: const EdgeInsets.fromLTRB(
+                          AppSpacing.pageMargin, 4, AppSpacing.pageMargin, 24),
+                      children: [
+                        for (final g in groups) ...[
+                          Padding(
+                            padding:
+                                const EdgeInsets.fromLTRB(4, 12, 4, 8),
+                            child: Row(
+                              children: [
+                                const Icon(AppIcons.folder,
+                                    size: 14, color: AppColors.textSecondary),
+                                const SizedBox(width: 6),
+                                Expanded(
+                                  child: Text(widget.store.titleOf(g.key),
+                                      style: AppText.callout.copyWith(
+                                          fontWeight: FontWeight.w600),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis),
+                                ),
+                                Pressable(
+                                  onTap: () =>
+                                      widget.onPickSession(g.key),
+                                  child: Text('切到该会话',
+                                      style: AppText.caption.copyWith(
+                                          color: AppColors.accent)),
+                                ),
+                              ],
+                            ),
+                          ),
+                          for (final p in g.value)
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 10),
+                              child: _PermSheet(
+                                perm: p,
+                                onDecide: (opt) => _decide(g.key, p, opt),
+                              ),
+                            ),
+                        ],
+                      ],
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _iconBtn(IconData icon, {VoidCallback? onTap}) {
+    return Pressable(
+      onTap: onTap ?? () {},
+      child: SizedBox(
+        width: 36,
+        height: 36,
+        child: Icon(icon, size: 20, color: AppColors.textPrimary),
       ),
     );
   }

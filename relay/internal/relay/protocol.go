@@ -61,11 +61,13 @@ type UpOpenHistoryPayload struct {
 	CWD       string `json:"cwd"`
 }
 
-// 下行 payload
+// DownPermRequestPayload 下行 payload
 type DownPermRequestPayload struct {
 	PermissionID json.RawMessage `json:"permissionId"`
 	ToolCall     json.RawMessage `json:"toolCall"`
 	Options      json.RawMessage `json:"options"`
+	DeadlineMs   int64           `json:"deadlineMs,omitempty"` // 超时截止（ms），端据此倒计时
+	Critical     bool            `json:"critical,omitempty"`   // §10 3.4 命中关键命令清单
 }
 type DownSessionCreatedPayload struct {
 	ConfigOptions json.RawMessage `json:"configOptions"`

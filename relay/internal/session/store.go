@@ -70,6 +70,30 @@ func (s *Store) CWD(sid string) string {
 	return ""
 }
 
+// Mode 解析该会话 configOptions 里的当前模式（default/plan/auto/yolo）。
+// 缺失返回 default（manual），与 Kimi 默认一致。
+func (s *Store) Mode(sid string) string {
+	s.mu.RLock()
+	cfg := s.m[sid].config
+	s.mu.RUnlock()
+	if len(cfg) == 0 {
+		return "default"
+	}
+	var arr []struct {
+		ID           string `json:"id"`
+		CurrentValue string `json:"currentValue"`
+	}
+	if json.Unmarshal(cfg, &arr) != nil {
+		return "default"
+	}
+	for _, c := range arr {
+		if c.ID == "mode" && c.CurrentValue != "" {
+			return c.CurrentValue
+		}
+	}
+	return "default"
+}
+
 func (s *Store) Tail(sid string) []json.RawMessage {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

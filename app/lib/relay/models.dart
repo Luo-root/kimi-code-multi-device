@@ -32,6 +32,21 @@ class StreamBlock {
   factory StreamBlock.tool({String? toolCallId, String? name, String? command}) =>
       StreamBlock._(BlockKind.tool,
           toolCallId: toolCallId, toolName: name, command: command);
+
+  /// 历史回放用：带完整字段的工具块（含状态与输出）。
+  factory StreamBlock.toolResult({
+    String? toolCallId,
+    String? name,
+    String? command,
+    ToolStatus status = ToolStatus.done,
+    String output = '',
+  }) =>
+      StreamBlock._(BlockKind.tool,
+          toolCallId: toolCallId,
+          toolName: name,
+          command: command,
+          status: status,
+          output: output);
 }
 
 /// 批准请求的一个选项。
@@ -49,6 +64,8 @@ class PermissionRequest {
   final String title;
   final String command;
   final List<PermOption> options;
+  /// 中继设定的超时截止时刻（ms since epoch）；缺失则由端兜底 5 分钟。
+  final DateTime? deadline;
 
   const PermissionRequest({
     required this.permissionId,
@@ -56,6 +73,7 @@ class PermissionRequest {
     required this.title,
     required this.command,
     required this.options,
+    this.deadline,
   });
 
   factory PermissionRequest.fromPayload(String? sid, Map<String, dynamic> p) {
@@ -67,14 +85,46 @@ class PermissionRequest {
               kind: o['kind']?.toString() ?? '',
             ))
         .toList();
+    DateTime? deadline;
+    final dl = p['deadlineMs'];
+    if (dl is num) {
+      deadline = DateTime.fromMillisecondsSinceEpoch(dl.toInt());
+    }
     return PermissionRequest(
       permissionId: p['permissionId'],
       sid: sid ?? '',
       title: tc['title']?.toString() ?? 'tool',
       command: extractToolText(tc),
       options: opts,
+      deadline: deadline,
     );
   }
+}
+
+/// §10 3.4 二元风险：内置关键命令清单，命中=红、要确认；其余中性。
+/// 不维护白名单——维护痛 ＞ 误判痛。
+const criticalCommandPatterns = <String>[
+  r'rm\s+-rf',
+  r'sudo\b',
+  r'git\s+push\s+(-f|--force)',
+  r'git\s+reset\s+--hard',
+  r'git\s+clean\s+-fd',
+  r'curl\s+.*\|\s*(sh|bash)',
+  r'wget\s+.*\|\s*(sh|bash)',
+  r'\bdeploy\b',
+  r'drop\s+(database|table)',
+  r'truncate\s+table',
+  r'>\s*~?/?\.ssh',
+  r'chmod\s+-R',
+  r'mkfs\b',
+  r'\bdd\s+if=',
+  r'\btruncate\b',
+];
+
+bool isCriticalCommand(String cmd) {
+  if (cmd.isEmpty) return false;
+  final lower = cmd.toLowerCase();
+  return criticalCommandPatterns.any((p) => RegExp(p).hasMatch(lower));
 }
 
 /// 会话元信息（来自 session.list）。

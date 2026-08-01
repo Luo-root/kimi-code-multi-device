@@ -227,25 +227,6 @@ class _StreamBlockViewState extends State<StreamBlockView> {
                           ],
                         ),
                       ),
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                        child: Row(
-                          children: [
-                            Icon(
-                                b.status == ToolStatus.failed
-                                    ? AppIcons.close
-                                    : AppIcons.check,
-                                size: 12,
-                                color: color),
-                            const SizedBox(width: 5),
-                            Expanded(
-                              child: Text(b.output,
-                                  style:
-                                      AppText.monoCaption.copyWith(color: color)),
-                            ),
-                          ],
-                        ),
-                      ),
                   ],
                 ),
               ),

@@ -36,8 +36,11 @@ class _RelayTestPageState extends State<RelayTestPage> {
     _client.onMessage = _store.handle;
     _client.onOpen = () => setState(() => _conn = _Conn.connected);
     _client.onClose = () => setState(() {
-          if (_conn == _Conn.connecting) _conn = _Conn.failed;
-          else if (_conn == _Conn.connected) _conn = _Conn.idle;
+          if (_conn == _Conn.connecting) {
+            _conn = _Conn.failed;
+          } else if (_conn == _Conn.connected) {
+            _conn = _Conn.idle;
+          }
         });
     _store.addListener(_onStore);
   }
@@ -74,11 +77,11 @@ class _RelayTestPageState extends State<RelayTestPage> {
   }
 
   void _decide(PermOption opt) {
-    final p = _store.pendingPermission;
+    final p = _store.pendingOf(_store.currentSid);
     if (p == null) return;
     _client.send('permission.decision',
         sid: p.sid, payload: {'permissionId': p.permissionId, 'optionId': opt.optionId});
-    setState(() => _store.pendingPermission = null);
+    _store.resolvePermission(p);
   }
 
   @override
@@ -94,7 +97,7 @@ class _RelayTestPageState extends State<RelayTestPage> {
   @override
   Widget build(BuildContext context) {
     final blocks = _store.blocksOf(_store.currentSid);
-    final perm = _store.pendingPermission;
+    final perm = _store.pendingOf(_store.currentSid);
     return Scaffold(
       backgroundColor: AppColors.background,
       body: SafeArea(
