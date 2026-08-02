@@ -25,6 +25,7 @@ const (
 	DownRelayError     = "relay.error"
 	DownSessionBusy    = "session.busy"   // 该会话是否有 prompt 进行中（驱动「停」）
 	DownSessionClosed  = "session.closed" // 某活跃会话被关闭，端侧移除 tab
+	DownRelayConfig    = "relay.config"   // 中继运行配置快照（门铃/许可策略真实值）
 )
 
 // 上行 type
@@ -40,6 +41,7 @@ const (
 	UpListSessions = "list_sessions"
 	UpOpenHistory  = "open_history"
 	UpCloseSession = "close_session"
+	UpConfigSet    = "config.set" // 端侧改配置（bark/许可策略），中继应用+写回文件
 )
 
 // 上行 payload
@@ -64,6 +66,13 @@ type UpOpenHistoryPayload struct {
 	CWD       string `json:"cwd"`
 }
 
+// UpConfigSetPayload 配置修改（指针字段区分"未设置"，只改传了的项）。
+type UpConfigSetPayload struct {
+	BarkURL             *string `json:"barkUrl,omitempty"`
+	PermTimeoutSeconds  *int    `json:"permTimeoutSeconds,omitempty"`
+	AutoPassNonCritical *bool   `json:"autoPassNonCritical,omitempty"`
+}
+
 // DownPermRequestPayload 下行 payload
 type DownPermRequestPayload struct {
 	PermissionID json.RawMessage `json:"permissionId"`
@@ -86,6 +95,13 @@ type DownSessionHistoryPayload struct {
 }
 type DownRelayStatePayload struct {
 	State string `json:"state"`
+}
+type DownRelayConfigPayload struct {
+	BarkURL             string `json:"barkUrl"`
+	BarkEnabled         bool   `json:"barkEnabled"`
+	PermTimeoutSeconds  int    `json:"permTimeoutSeconds"`
+	AutoPassNonCritical bool   `json:"autoPassNonCritical"`
+	ConfigPath          string `json:"configPath,omitempty"` // 配置文件位置，端侧展示
 }
 type DownSessionBusyPayload struct {
 	Busy bool `json:"busy"`

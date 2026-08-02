@@ -32,6 +32,22 @@ class SessionStore extends ChangeNotifier {
   String? lastError;
   DateTime? lastSyncedAt;
 
+  /// 中继运行配置快照（relay.config 下行），设置页展示真实值。
+  RelayConfig? _relayConfig;
+  RelayConfig? get relayConfig => _relayConfig;
+
+  /// 乐观应用端侧发起的配置修改（config.set）。回执 relay.config 会以真实值覆盖。
+  void applyRelayConfig(Map<String, dynamic> patch) {
+    final cur = _relayConfig;
+    if (cur == null) return;
+    _relayConfig = cur.copyWith(
+      barkUrl: patch['barkUrl'] as String?,
+      permTimeoutSeconds: (patch['permTimeoutSeconds'] as num?)?.toInt(),
+      autoPassNonCritical: patch['autoPassNonCritical'] as bool?,
+    );
+    notifyListeners();
+  }
+
   // ---- 连接态（§12 诚实三态）----
   // WS 层与 kimi 健康分开：WS 断 = offline/connecting；WS 通但 kimi 死 = degraded。
   bool _wsConnected = false;
@@ -152,6 +168,9 @@ class SessionStore extends ChangeNotifier {
               .toList();
           if (!_activeSids.contains(sid)) _activeSids.add(sid);
         }
+        notifyListeners();
+      case 'relay.config':
+        _relayConfig = RelayConfig.fromPayload(payload);
         notifyListeners();
       case 'relay.error':
         lastError = payload['message']?.toString();
