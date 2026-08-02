@@ -1016,6 +1016,17 @@ class _SessionDrawer extends StatefulWidget {
 class _SessionDrawerState extends State<_SessionDrawer> {
   String _q = '';
 
+  /// 折叠中的工作区分组（按 _groupKey）。搜索时自动忽略折叠，保证直达。
+  final Set<String> _collapsed = {};
+
+  bool get _searching => _q.trim().isNotEmpty;
+
+  void _toggleGroup(String key) {
+    setState(() {
+      if (!_collapsed.add(key)) _collapsed.remove(key);
+    });
+  }
+
   String _groupKey(SessionMeta m) {
     // Windows 路径用反斜杠分隔，这里兼容两种分隔符。
     final parts =
@@ -1025,8 +1036,13 @@ class _SessionDrawerState extends State<_SessionDrawer> {
         : (parts.isNotEmpty ? parts.last : '—');
   }
 
-  bool _match(SessionMeta m) =>
-      _q.isEmpty || m.title.toLowerCase().contains(_q.toLowerCase());
+  // 匹配标题或工作目录路径（按目录找也是常见习惯）。
+  bool _match(SessionMeta m) {
+    final q = _q.trim().toLowerCase();
+    if (q.isEmpty) return true;
+    return m.title.toLowerCase().contains(q) ||
+        m.cwd.toLowerCase().contains(q);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1113,24 +1129,27 @@ class _SessionDrawerState extends State<_SessionDrawer> {
                     padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
                     children: [
                       for (final entry in groups.entries) ...[
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(8, 10, 8, 4),
-                          child: Row(
+                        _groupHeader(entry.key, entry.value.length),
+                        AnimatedCrossFade(
+                          duration: const Duration(milliseconds: 180),
+                          firstCurve: Curves.easeOut,
+                          secondCurve: Curves.easeOut,
+                          // 搜索时忽略折叠：所有匹配组展开，方便直达。
+                          // 其余情况完全由用户控制，含当前会话的组也可折叠。
+                          crossFadeState:
+                              (!_searching && _collapsed.contains(entry.key))
+                                  ? CrossFadeState.showSecond
+                                  : CrossFadeState.showFirst,
+                          firstChild: Column(
+                            mainAxisSize: MainAxisSize.min,
                             children: [
-                              const Icon(AppIcons.folder,
-                                  size: 15, color: AppColors.textSecondary),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(entry.key,
-                                    style: AppText.callout.copyWith(
-                                        fontWeight: FontWeight.w600),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis),
-                              ),
+                              for (final m in entry.value)
+                                _row(m, m.sessionId == cur),
                             ],
                           ),
+                          secondChild:
+                              const SizedBox(width: double.infinity),
                         ),
-                        for (final m in entry.value) _row(m, m.sessionId == cur),
                       ],
                     ],
                   ),
@@ -1156,6 +1175,37 @@ class _SessionDrawerState extends State<_SessionDrawer> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  /// 工作区分组头：可点击折叠/展开，右侧显示会话数。
+  Widget _groupHeader(String key, int count) {
+    final collapsed = _collapsed.contains(key);
+    return Pressable(
+      onTap: () => _toggleGroup(key),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(8, 10, 8, 4),
+        child: Row(
+          children: [
+            Icon(
+                collapsed ? AppIcons.chevronRight : AppIcons.chevronDown,
+                size: 14,
+                color: AppColors.textSecondary),
+            const SizedBox(width: 4),
+            const Icon(AppIcons.folder,
+                size: 15, color: AppColors.textSecondary),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(key,
+                  style: AppText.callout.copyWith(fontWeight: FontWeight.w600),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis),
+            ),
+            Text('$count', style: AppText.monoCaption),
+            const SizedBox(width: 2),
+          ],
+        ),
       ),
     );
   }
