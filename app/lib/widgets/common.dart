@@ -1,9 +1,27 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
 import '../theme/app_dimens.dart';
 import '../theme/app_shadows.dart';
 import '../theme/app_icons.dart';
+
+/// 复制到剪贴板并给出轻量 toast 反馈。供消息 / 代码块 / 命令复制复用。
+/// 入参用 ScaffoldMessengerState（而非 BuildContext），便于异步回调里安全使用。
+void copyToClipboard(ScaffoldMessengerState messenger, String text) {
+  if (text.isEmpty) return;
+  Clipboard.setData(ClipboardData(text: text));
+  messenger.showSnackBar(
+    SnackBar(
+      content: Text('已复制',
+          style: AppText.callout.copyWith(color: AppColors.surface)),
+      backgroundColor: AppColors.textPrimary,
+      behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      duration: const Duration(milliseconds: 1400),
+    ),
+  );
+}
 
 /// 按压反馈：轻量透明度变化。
 class Pressable extends StatefulWidget {

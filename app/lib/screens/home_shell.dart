@@ -10,7 +10,6 @@ import '../theme/app_shadows.dart';
 import '../theme/app_icons.dart';
 import '../widgets/common.dart';
 import '../widgets/stream_block.dart';
-import 'design_showcase.dart';
 
 // ---------- 常量 ----------
 
@@ -84,6 +83,12 @@ class _HomeShellState extends State<HomeShell> {
   final _store = SessionStore();
   final _inputCtrl = TextEditingController();
   final _scrollCtrl = ScrollController();
+  final _dockKey = GlobalKey();
+
+  /// 用户是否在列表底部附近：非底部时新消息不应把视口拽回（§UX 防滚动劫持）。
+  bool _atBottom = true;
+  /// 底部 dock 真实高度（动态测量，替代写死的 360/230/150）。
+  double _dockH = 150;
 
   String _relayUrl = _kDefaultRelayUrl;
   String _effortId = 'medium'; // 占位
@@ -97,13 +102,34 @@ class _HomeShellState extends State<HomeShell> {
     _client.onClose = () => _store.markDisconnected(reconnecting: true);
     _client.onReconnecting = () => _store.markDisconnected(reconnecting: true);
     _store.addListener(_onStore);
+    _scrollCtrl.addListener(_onScroll);
     _connect(_relayUrl);
+  }
+
+  void _onScroll() {
+    if (!_scrollCtrl.hasClients) return;
+    final pos = _scrollCtrl.position;
+    final atBottom = pos.pixels >= pos.maxScrollExtent - 60;
+    if (atBottom != _atBottom) _atBottom = atBottom;
+  }
+
+  /// 测量 dock 真实高度，变化时刷新列表底部留白，避免消息被 dock 遮挡。
+  void _measureDock() {
+    final ctx = _dockKey.currentContext;
+    if (ctx == null) return;
+    final h = ctx.size?.height;
+    if (h != null && (h - _dockH).abs() > 0.5) {
+      setState(() => _dockH = h);
+    }
   }
 
   void _onStore() {
     setState(() {});
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollCtrl.hasClients) {
+      _measureDock();
+      // 仅当用户停在底部（或刚发消息，见 _send 置 _atBottom=true）才自动跟随，
+      // 否则保留用户当前滚动位置，长对话翻看不被拽回。
+      if (_atBottom && _scrollCtrl.hasClients) {
         _scrollCtrl.animateTo(
           _scrollCtrl.position.maxScrollExtent,
           duration: const Duration(milliseconds: 180),
@@ -127,18 +153,6 @@ class _HomeShellState extends State<HomeShell> {
 
   // ---- 顶栏选择回调：下发 + 乐观更新 ----
 
-  void _onProvider(String prov) {
-    final sid = _store.currentSid;
-    final cfg = _store.configOf(sid);
-    final models = _cfgList(cfg, 'model')
-        .where((o) => _provOf(o['value']?.toString() ?? '') == prov)
-        .toList();
-    if (models.isEmpty || sid == null) return;
-    final target = models.first['value']?.toString() ?? '';
-    _client.send('set_model', sid: sid, payload: {'value': target});
-    _store.applyConfigOption(sid, 'model', target);
-  }
-
   void _onModel(String value) {
     final sid = _store.currentSid;
     if (sid == null) return;
@@ -161,10 +175,30 @@ class _HomeShellState extends State<HomeShell> {
     final t = text.trim();
     final sid = _store.currentSid;
     if (t.isEmpty || sid == null || _store.relayState != 'ok') return;
+    // 运行中（AI 还在输出）忽略发送：发送键已隐藏为「停」，Enter 也不应漏发。
+    if (_store.busyOf(sid)) return;
     _store.addUser(sid, t);
     _client.send('prompt', sid: sid, payload: {'text': t});
     _inputCtrl.clear();
     setState(() => _slashQuery = null);
+    // 自己发的消息：强制滚到底，确保看到最新。
+    _atBottom = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollCtrl.hasClients) {
+        _scrollCtrl.animateTo(
+          _scrollCtrl.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  /// 关闭一个顶部活跃会话：发 close_session 给中继（尽力关闭 Kimi 会话 + 广播
+  /// session.closed），并乐观移除本地 tab。
+  void _closeSession(String sid) {
+    _client.send('close_session', sid: sid, payload: {'sessionId': sid});
+    _store.removeActive(sid);
   }
 
   void _onInputChanged(String v) {
@@ -196,9 +230,15 @@ class _HomeShellState extends State<HomeShell> {
 
   // ---- 抽屉动作 ----
 
-  void _openHistory(SessionMeta m) {
-    _client.send('open_history',
-        sid: m.sessionId, payload: {'sessionId': m.sessionId, 'cwd': m.cwd});
+  /// 侧边栏点会话 = 切换，不是给主屏加一个可切换会话。
+  /// active 会话直接切 C 位；历史会话先发 open_history（恢复+回放）再切。
+  void _openSession(SessionMeta m) {
+    final sid = m.sessionId;
+    if (!_store.activeSids.contains(sid)) {
+      _client.send('open_history',
+          sid: sid, payload: {'sessionId': sid, 'cwd': m.cwd});
+    }
+    _store.setCurrent(sid);
   }
 
   void _newSession() => _client.send('new_session', payload: {});
@@ -228,12 +268,6 @@ class _HomeShellState extends State<HomeShell> {
             _client.disconnect();
             _connect(url);
           },
-          onPalette: () {
-            Navigator.of(context).pop();
-            Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => const DesignShowcase()),
-            );
-          },
         ),
       );
 
@@ -258,6 +292,7 @@ class _HomeShellState extends State<HomeShell> {
     _client.disconnect();
     _store.removeListener(_onStore);
     _inputCtrl.dispose();
+    _scrollCtrl.removeListener(_onScroll);
     _scrollCtrl.dispose();
     super.dispose();
   }
@@ -279,8 +314,9 @@ class _HomeShellState extends State<HomeShell> {
                 s.toLowerCase().contains(_slashQuery!.toLowerCase()))
             .toList();
 
-    final dockH = perm != null ? 360.0 : (slashOpen ? 230.0 : 150.0);
-    final running = sid != null && _store.sessionStatus(sid) == 'running';
+    final dockH = _dockH; // 动态测量，替代写死的 360/230/150
+    // §13「停」随 AI 输出态：busy（session/prompt 进行中）时显眼，输出完退场。
+    final running = sid != null && _store.busyOf(sid);
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -291,7 +327,7 @@ class _HomeShellState extends State<HomeShell> {
           store: _store,
           onPick: (m) {
             Navigator.of(context).pop();
-            _openHistory(m);
+            _openSession(m);
           },
           onNew: () {
             Navigator.of(context).pop();
@@ -311,17 +347,14 @@ class _HomeShellState extends State<HomeShell> {
               cfg: cfg,
               effortId: _effortId,
               relayState: _store.relayState,
-              onProvider: _onProvider,
               onModel: _onModel,
               onEffort: _onEffort,
               onMode: _onMode,
-              onPalette: () => Navigator.of(context).push(
-                MaterialPageRoute(builder: (_) => const DesignShowcase()),
-              ),
             ),
             _SessionSwitcher(
               store: _store,
               onOpenQueue: _openQueue,
+              onClose: _closeSession,
             ),
             _ConnBanner(
               state: _store.relayState,
@@ -354,20 +387,23 @@ class _HomeShellState extends State<HomeShell> {
                     left: 0,
                     right: 0,
                     bottom: 0,
-                    child: _BottomDock(
-                      enabled: _store.relayState == 'ok' && sid != null,
-                      running: running,
-                      pending: perm,
-                      controller: _inputCtrl,
-                      onSend: _send,
-                      onStop: _cancelCurrent,
-                      onChanged: _onInputChanged,
-                      onOpenPlus: _onAttach,
-                      onChip: _send,
-                      slashOpen: slashOpen && slashOpts.isNotEmpty,
-                      slashOpts: slashOpts,
-                      onPickSlash: _pickSlash,
-                      onDecide: _decide,
+                    child: Container(
+                      key: _dockKey,
+                      child: _BottomDock(
+                        enabled: _store.relayState == 'ok' && sid != null,
+                        running: running,
+                        pending: perm,
+                        controller: _inputCtrl,
+                        onSend: _send,
+                        onStop: _cancelCurrent,
+                        onChanged: _onInputChanged,
+                        onOpenPlus: _onAttach,
+                        onChip: _send,
+                        slashOpen: slashOpen && slashOpts.isNotEmpty,
+                        slashOpts: slashOpts,
+                        onPickSlash: _pickSlash,
+                        onDecide: _decide,
+                      ),
                     ),
                   ),
                 ],
@@ -386,38 +422,21 @@ class _TopBar extends StatelessWidget {
   final dynamic cfg;
   final String effortId;
   final String relayState;
-  final ValueChanged<String> onProvider;
   final ValueChanged<String> onModel;
   final ValueChanged<String> onEffort;
   final ValueChanged<String> onMode;
-  final VoidCallback onPalette;
 
   const _TopBar({
     required this.cfg,
     required this.effortId,
     required this.relayState,
-    required this.onProvider,
     required this.onModel,
     required this.onEffort,
     required this.onMode,
-    required this.onPalette,
   });
 
   @override
   Widget build(BuildContext context) {
-    final modelOpts = _cfgList(cfg, 'model');
-    final curModel = _cfgCur(cfg, 'model');
-    final providers =
-        modelOpts.map((o) => _provOf(o['value']?.toString() ?? '')).toSet().toList();
-    final curProv = _provOf(curModel);
-    final modelsOfProv = modelOpts
-        .where((o) => _provOf(o['value']?.toString() ?? '') == curProv)
-        .toList();
-    final curModelLabel = modelsOfProv
-            .firstWhere((o) => o['value'] == curModel,
-                orElse: () => <String, dynamic>{})
-            .let((m) => (m['name']?.toString() ?? curModel));
-
     final dot = switch (relayState) {
       'ok' => AppColors.approve,
       'degraded' => AppColors.warning,
@@ -431,43 +450,18 @@ class _TopBar extends StatelessWidget {
           _iconBtn(AppIcons.menu,
               onTap: () => Scaffold.of(context).openDrawer()),
           const SizedBox(width: 6),
+          // provider·model·思考深度 → 一个级联主菜单（§09 级联结构）。
           Expanded(
-            child: Row(
-              children: [
-                Flexible(
-                  child: ChipDropdown(
-                    triggerLabel: providers.isEmpty ? '—' : curProv,
-                    options: providers
-                        .map((p) => DropdownOption(id: p, label: p))
-                        .toList(),
-                    selectedId: curProv,
-                    onSelect: onProvider,
-                  ),
-                ),
-                const SizedBox(width: 5),
-                Flexible(
-                  child: ChipDropdown(
-                    triggerLabel:
-                        modelsOfProv.isEmpty ? '—' : (curModelLabel.isEmpty ? '—' : curModelLabel),
-                    options: modelsOfProv
-                        .map((o) => DropdownOption(
-                            id: o['value']?.toString() ?? '',
-                            label: o['name']?.toString() ?? ''))
-                        .toList(),
-                    selectedId: curModel,
-                    onSelect: onModel,
-                  ),
-                ),
-                const SizedBox(width: 5),
-                Flexible(
-                  child: ChipDropdown(
-                    triggerLabel: _effortLabel[effortId] ?? effortId,
-                    options: _effortOpts,
-                    selectedId: effortId,
-                    onSelect: onEffort,
-                  ),
-                ),
-              ],
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: _CascadeConfigMenu(
+                cfg: cfg,
+                effortId: effortId,
+                effortOpts: _effortOpts,
+                effortLabel: _effortLabel,
+                onModel: onModel,
+                onEffort: onEffort,
+              ),
             ),
           ),
           const SizedBox(width: 6),
@@ -478,8 +472,6 @@ class _TopBar extends StatelessWidget {
           ),
           const SizedBox(width: 10),
           _ModeIconMenu(cfg: cfg, onMode: onMode),
-          const SizedBox(width: 4),
-          _iconBtn(AppIcons.palette, onTap: onPalette),
         ],
       ),
     );
@@ -516,6 +508,7 @@ class _ModeIconMenu extends StatefulWidget {
 class _ModeIconMenuState extends State<_ModeIconMenu> {
   OverlayEntry? _entry;
   bool _down = false;
+  double _menuMaxH = 320;
   bool get _open => _entry != null;
 
   void _toggle() => _open ? _close() : _openMenu();
@@ -536,6 +529,13 @@ class _ModeIconMenuState extends State<_ModeIconMenu> {
     final box = context.findRenderObject() as RenderBox;
     final off = box.localToGlobal(Offset.zero);
     final cur = _cfgCur(widget.cfg, 'mode');
+    // 防溢出：下方不足且上方更宽时翻到上方弹出；maxH 取可用高度。
+    final vh = MediaQuery.of(context).size.height;
+    final topY = off.dy + box.size.height + 6;
+    final availBelow = vh - topY;
+    final availAbove = off.dy - 6;
+    final above = availBelow < 320 && availAbove > availBelow;
+    _menuMaxH = (above ? availAbove : availBelow).clamp(160.0, 360.0);
     _entry = OverlayEntry(
       builder: (ctx) => Stack(
         children: [
@@ -547,7 +547,8 @@ class _ModeIconMenuState extends State<_ModeIconMenu> {
             ),
           ),
           Positioned(
-            top: off.dy + box.size.height + 6,
+            top: above ? null : topY,
+            bottom: above ? (vh - off.dy + 6) : null,
             right: 8,
             width: 220,
             child: Container(
@@ -558,21 +559,26 @@ class _ModeIconMenuState extends State<_ModeIconMenu> {
                 boxShadow: AppShadows.popup,
               ),
               padding: const EdgeInsets.symmetric(vertical: 8),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: _modes
-                    .map((m) => _MenuRow(
-                          icon: _modeIcon[m['value']] ?? AppIcons.modeManual,
-                          label: m['name']?.toString() ?? m['value']?.toString() ?? '',
-                          subtitle: m['description']?.toString() ??
-                              _modeFallbackDesc[m['value']],
-                          selected: m['value'] == cur,
-                          onTap: () {
-                            widget.onMode(m['value']?.toString() ?? '');
-                            _close();
-                          },
-                        ))
-                    .toList(),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(maxHeight: _menuMaxH),
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: _modes
+                        .map((m) => _MenuRow(
+                              icon: _modeIcon[m['value']] ?? AppIcons.modeManual,
+                              label: m['name']?.toString() ??
+                                  m['value']?.toString() ??
+                                  '',
+                              selected: m['value'] == cur,
+                              onTap: () {
+                                widget.onMode(m['value']?.toString() ?? '');
+                                _close();
+                              },
+                            ))
+                        .toList(),
+                  ),
+                ),
               ),
             ),
           ),
@@ -622,13 +628,11 @@ class _ModeIconMenuState extends State<_ModeIconMenu> {
 class _MenuRow extends StatefulWidget {
   final IconData? icon;
   final String label;
-  final String? subtitle;
   final bool selected;
   final VoidCallback onTap;
   const _MenuRow({
     required this.label,
     this.icon,
-    this.subtitle,
     this.selected = false,
     required this.onTap,
   });
@@ -662,27 +666,329 @@ class _MenuRowState extends State<_MenuRow> {
               const SizedBox(width: 10),
             ],
             Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(widget.label,
-                      style: AppText.body.copyWith(
-                        color: AppColors.textPrimary,
-                        fontWeight: FontWeight.w600,
-                      )),
-                  if (widget.subtitle != null) ...[
-                    const SizedBox(height: 2),
-                    Text(widget.subtitle!, style: AppText.caption),
-                  ],
-                ],
-              ),
+              child: Text(widget.label,
+                  style: AppText.callout.copyWith(
+                    color: AppColors.textPrimary,
+                    fontWeight: FontWeight.w600,
+                  )),
             ),
             if (widget.selected)
               const Padding(
                 padding: EdgeInsets.only(left: 10),
                 child: Icon(AppIcons.check, size: 16, color: AppColors.accent),
               ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ---------- 级联配置菜单：provider → model → 思考深度（§09 级联结构）----------
+
+/// 一个主触发器，下钻三级子菜单。选中 model 即下发 set_model（乐观更新），
+/// 思考深度为占位（会话级 ACP 切法待确认，不下发）。触发器用短标签，菜单看全称。
+class _CascadeConfigMenu extends StatefulWidget {
+  final dynamic cfg;
+  final String effortId;
+  final List<DropdownOption> effortOpts;
+  final Map<String, String> effortLabel;
+  final ValueChanged<String> onModel;
+  final ValueChanged<String> onEffort;
+
+  const _CascadeConfigMenu({
+    required this.cfg,
+    required this.effortId,
+    required this.effortOpts,
+    required this.effortLabel,
+    required this.onModel,
+    required this.onEffort,
+  });
+
+  @override
+  State<_CascadeConfigMenu> createState() => _CascadeConfigMenuState();
+}
+
+class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
+  OverlayEntry? _entry;
+  bool _down = false;
+  double _menuMaxH = 300;
+  bool get _open => _entry != null;
+
+  List<Map<String, dynamic>> get _models => _cfgList(widget.cfg, 'model');
+  String get _curModel => _cfgCur(widget.cfg, 'model');
+
+  List<String> get _providers {
+    final seen = <String>[];
+    for (final o in _models) {
+      final p = _provOf(o['value']?.toString() ?? '');
+      if (!seen.contains(p)) seen.add(p);
+    }
+    return seen;
+  }
+
+  List<Map<String, dynamic>> _modelsOf(String prov) => _models
+      .where((o) => _provOf(o['value']?.toString() ?? '') == prov)
+      .toList();
+
+  String get _curModelLabel {
+    final cur = _curModel;
+    for (final o in _models) {
+      if (o['value'] == cur) return o['name']?.toString() ?? cur;
+    }
+    return cur.isEmpty ? '选择模型' : cur;
+  }
+
+  void _toggle() => _open ? _close() : _openMenu();
+
+  void _openMenu() {
+    final cur = _curModel;
+    var level = 0;
+    var selProv = _provOf(cur);
+    var selModel = cur;
+    final box = context.findRenderObject() as RenderBox;
+    final off = box.localToGlobal(Offset.zero);
+
+    // 防溢出：下方空间不足且上方更宽时，菜单翻到触发点上方弹出；maxH 取可用高度。
+    final vh = MediaQuery.of(context).size.height;
+    final screenW = MediaQuery.of(context).size.width;
+    final topY = off.dy + box.size.height + 6;
+    final availBelow = vh - topY;
+    final availAbove = off.dy - 6;
+    final above = availBelow < 340 && availAbove > availBelow;
+    _menuMaxH = (above ? availAbove : availBelow).clamp(160.0, 360.0);
+    const width = 250.0;
+    final left = (AppSpacing.pageMargin + width > screenW - 8)
+        ? screenW - 8 - width
+        : AppSpacing.pageMargin;
+
+    _entry = OverlayEntry(builder: (ctx) {
+      return StatefulBuilder(builder: (ctx2, setOverlay) {
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _close,
+                child: const SizedBox.shrink(),
+              ),
+            ),
+            Positioned(
+              top: above ? null : topY,
+              bottom: above ? (vh - off.dy + 6) : null,
+              left: left,
+              width: width,
+              child: Container(
+                clipBehavior: Clip.antiAlias,
+                decoration: BoxDecoration(
+                  color: AppColors.surface,
+                  borderRadius: BorderRadius.circular(AppRadius.card),
+                  boxShadow: AppShadows.popup,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _header(level, selProv, selModel, setOverlay, () {
+                      setOverlay(() {
+                        if (level > 0) level--;
+                      });
+                    }),
+                    ConstrainedBox(
+                      constraints: BoxConstraints(maxHeight: _menuMaxH),
+                      child: SingleChildScrollView(
+                        child: _levelList(level, selProv, (prov) {
+                          setOverlay(() {
+                            selProv = prov;
+                            level = 1;
+                          });
+                        }, (modelVal) {
+                          widget.onModel(modelVal);
+                          _close();
+                        }, (effId) {
+                          widget.onEffort(effId);
+                          _close();
+                        }, setOverlay),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        );
+      });
+    });
+    Overlay.of(context).insert(_entry!);
+    setState(() {});
+  }
+
+  void _close() {
+    _entry?.remove();
+    _entry = null;
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    _entry?.remove();
+    super.dispose();
+  }
+
+  Widget _header(int level, String selProv, String selModel,
+      StateSetter setOverlay, VoidCallback onBack) {
+    final titles = ['Provider', selProv, _effortName(selModel)];
+    return Container(
+      padding: const EdgeInsets.fromLTRB(8, 6, 14, 6),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: AppColors.hairline)),
+      ),
+      child: Row(
+        children: [
+          if (level > 0)
+            Pressable(
+              onTap: onBack,
+              child: const SizedBox(
+                width: 28,
+                height: 28,
+                child: Icon(AppIcons.arrowLeft,
+                    size: 15, color: AppColors.textSecondary),
+              ),
+            )
+          else
+            const SizedBox(width: 28, height: 28),
+          Expanded(
+            child: Text(
+              titles[level],
+              textAlign: TextAlign.center,
+              style: AppText.callout.copyWith(fontWeight: FontWeight.w600),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const SizedBox(width: 28, height: 28),
+        ],
+      ),
+    );
+  }
+
+  String _effortName(String modelVal) {
+    for (final o in _models) {
+      if (o['value'] == modelVal) return o['name']?.toString() ?? modelVal;
+    }
+    return modelVal;
+  }
+
+  Widget _levelList(
+    int level,
+    String selProv,
+    ValueChanged<String> onPickProv,
+    ValueChanged<String> onPickModel,
+    ValueChanged<String> onPickEffort,
+    StateSetter setOverlay,
+  ) {
+    if (level == 0) {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final p in _providers)
+            _row(p,
+                trailing: AppIcons.chevronRight,
+                selected: p == _provOf(_curModel),
+                onTap: () => onPickProv(p)),
+        ],
+      );
+    }
+    if (level == 1) {
+      final models = _modelsOf(selProv);
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final o in models)
+            _row(o['name']?.toString() ?? o['value']?.toString() ?? '',
+                trailing: AppIcons.chevronRight,
+                selected: o['value'] == _curModel,
+                onTap: () => onPickModel(o['value']?.toString() ?? '')),
+          // 显式「思考深度」入口：选模型不再强制下钻（深度占位暂不下发），
+          // 想调深度再单独点进来（§9 级联，去摩擦）。
+          _row('思考深度',
+              trailing: AppIcons.chevronRight,
+              onTap: () => setOverlay(() {
+                    level = 2;
+                  })),
+        ],
+      );
+    }
+    // level 2：思考深度
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final e in widget.effortOpts)
+          _row(widget.effortLabel[e.id] ?? e.label,
+              selected: e.id == widget.effortId,
+              onTap: () => onPickEffort(e.id)),
+      ],
+    );
+  }
+
+  Widget _row(String label,
+      {IconData? trailing, bool selected = false, required VoidCallback onTap}) {
+    return Pressable(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(label,
+                  style: AppText.callout.copyWith(
+                    color: AppColors.textPrimary,
+                    fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis),
+            ),
+            if (selected)
+              const Icon(AppIcons.check, size: 15, color: AppColors.accent)
+            else if (trailing != null)
+              Icon(trailing, size: 14, color: AppColors.placeholder),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTapDown: (_) => setState(() => _down = true),
+      onTapUp: (_) => setState(() => _down = false),
+      onTapCancel: () => setState(() => _down = false),
+      onTap: _toggle,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 120),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          color: _down ? const Color(0xFFDADAE0) : AppColors.keyCap,
+          borderRadius: BorderRadius.circular(AppRadius.pill),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(AppIcons.modelChip,
+                size: 13, color: AppColors.textSecondary),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                _curModelLabel,
+                style: AppText.callout.copyWith(color: AppColors.textPrimary),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            const SizedBox(width: 4),
+            Icon(_open ? AppIcons.chevronUp : AppIcons.chevronDown,
+                size: 12, color: AppColors.textSecondary),
           ],
         ),
       ),
@@ -1154,12 +1460,14 @@ class _InputBar extends StatelessWidget {
         boxShadow: AppShadows.input,
       ),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           Pressable(
             onTap: onOpenPlus,
             child: Container(
               width: 32,
               height: 32,
+              margin: const EdgeInsets.only(bottom: 4),
               decoration: const BoxDecoration(
                   color: AppColors.keyCap, shape: BoxShape.circle),
               child:
@@ -1172,8 +1480,15 @@ class _InputBar extends StatelessWidget {
               controller: controller,
               enabled: enabled,
               style: AppText.body,
-              maxLines: 1,
+              // 多行：写代码/长指令不被压成一行；Enter 发送，Shift+Enter 换行。
+              minLines: 1,
+              maxLines: 6,
+              keyboardType: TextInputType.multiline,
               textInputAction: TextInputAction.send,
+              // 代码 agent：关闭自动纠错/自动大写，避免被改词。
+              autocorrect: false,
+              enableSuggestions: false,
+              textCapitalization: TextCapitalization.none,
               onChanged: onChanged,
               onSubmitted: onSend,
               decoration: InputDecoration(
@@ -1428,14 +1743,12 @@ class _SettingsSheet extends StatefulWidget {
   final String relayUrl;
   final String effortLabel;
   final ValueChanged<String> onReconnect;
-  final VoidCallback onPalette;
   const _SettingsSheet({
     super.key,
     required this.store,
     required this.relayUrl,
     required this.effortLabel,
     required this.onReconnect,
-    required this.onPalette,
   });
 
   @override
@@ -1473,13 +1786,16 @@ class _SettingsSheetState extends State<_SettingsSheet> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           const SizedBox(height: 8),
-          Container(
-            width: 36,
-            height: 4,
-            margin: const EdgeInsets.only(bottom: 8),
-            decoration: BoxDecoration(
-              color: AppColors.keyCap,
-              borderRadius: BorderRadius.circular(2),
+          // 拖拽把手：stretch 列里须居中，否则会被拉成全宽横杠。
+          Center(
+            child: Container(
+              width: 36,
+              height: 4,
+              margin: const EdgeInsets.only(bottom: 8),
+              decoration: BoxDecoration(
+                color: AppColors.keyCap,
+                borderRadius: BorderRadius.circular(2),
+              ),
             ),
           ),
           Padding(
@@ -1490,15 +1806,6 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                     size: 18, color: AppColors.textPrimary),
                 const SizedBox(width: 8),
                 const Expanded(child: Text('设置', style: AppText.title1)),
-                Pressable(
-                  onTap: widget.onPalette,
-                  child: const SizedBox(
-                    width: 32,
-                    height: 32,
-                    child: Icon(AppIcons.palette,
-                        size: 18, color: AppColors.textSecondary),
-                  ),
-                ),
                 Pressable(
                   onTap: () => Navigator.of(context).pop(),
                   child: const SizedBox(
@@ -1743,7 +2050,12 @@ class _ConnBanner extends StatelessWidget {
 class _SessionSwitcher extends StatelessWidget {
   final SessionStore store;
   final VoidCallback onOpenQueue;
-  const _SessionSwitcher({required this.store, required this.onOpenQueue});
+  final ValueChanged<String> onClose;
+  const _SessionSwitcher({
+    required this.store,
+    required this.onOpenQueue,
+    required this.onClose,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1760,6 +2072,7 @@ class _SessionSwitcher extends StatelessWidget {
           Expanded(
             child: SizedBox(
               height: 34,
+              // 多会话横向滚动浏览（单屏放不下时不截断）。
               child: ListView.separated(
                 scrollDirection: Axis.horizontal,
                 padding: const EdgeInsets.symmetric(horizontal: 4),
@@ -1772,6 +2085,7 @@ class _SessionSwitcher extends StatelessWidget {
                     status: store.sessionStatus(sid),
                     selected: sid == cur,
                     onTap: () => store.setCurrent(sid),
+                    onClose: () => onClose(sid),
                   );
                 },
               ),
@@ -1792,11 +2106,13 @@ class _SessionTab extends StatelessWidget {
   final String status; // pending / running / idle
   final bool selected;
   final VoidCallback onTap;
+  final VoidCallback onClose;
   const _SessionTab({
     required this.title,
     required this.status,
     required this.selected,
     required this.onTap,
+    required this.onClose,
   });
 
   @override
@@ -1837,6 +2153,16 @@ class _SessionTab extends StatelessWidget {
                 ),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            const SizedBox(width: 2),
+            // 关闭按钮：移除此活跃会话 tab（§11 多会话管理）。
+            Pressable(
+              onTap: onClose,
+              child: const SizedBox(
+                width: 18,
+                height: 18,
+                child: Icon(AppIcons.close, size: 13, color: AppColors.textSecondary),
               ),
             ),
           ],

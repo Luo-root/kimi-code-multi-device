@@ -20,6 +20,7 @@ type sessState struct {
 	config json.RawMessage
 	cwd    string
 	tail   []json.RawMessage
+	busy   bool // session/prompt 进行中（AI 还在输出），驱动端「停」可见性
 }
 
 type Store struct {
@@ -49,6 +50,36 @@ func (s *Store) SetCWD(sid, cwd string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ensureLocked(sid).cwd = cwd
+}
+
+// SetBusy 标记某会话是否有 session/prompt 在进行。
+func (s *Store) SetBusy(sid string, busy bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureLocked(sid).busy = busy
+}
+
+// Busy 返回某会话是否在跑。
+func (s *Store) Busy(sid string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if st, ok := s.m[sid]; ok {
+		return st.busy
+	}
+	return false
+}
+
+// BusySIDs 返回所有在跑的会话（供 snapshot 补发 busy）。
+func (s *Store) BusySIDs() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []string
+	for k, st := range s.m {
+		if st.busy {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 func (s *Store) AppendUpdate(sid string, update json.RawMessage) {
@@ -116,6 +147,15 @@ func (s *Store) SIDs() []string {
 	return out
 }
 
+// Has 报告该会话是否仍在中继活跃表（即 Kimi 侧已知或已成功恢复）。
+// 用于上行 prompt 前的防御性校验，避免把失效 sid 透传给 Kimi 报 Unknown sessionId。
+func (s *Store) Has(sid string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.m[sid]
+	return ok
+}
+
 func (s *Store) Snapshot() map[string]json.RawMessage {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -140,4 +180,11 @@ func (s *Store) History() []SessionMeta {
 	out := make([]SessionMeta, len(s.history))
 	copy(out, s.history)
 	return out
+}
+
+// Remove 移除一个活跃会话（端侧关闭后调用）。ta 与历史列表由 Kimi 侧真正删除。
+func (s *Store) Remove(sid string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.m, sid)
 }
