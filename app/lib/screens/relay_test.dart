@@ -111,7 +111,7 @@ class _RelayTestPageState extends State<RelayTestPage> {
                       controller: _scrollCtrl,
                       padding: const EdgeInsets.all(AppSpacing.pageMargin),
                       itemCount: blocks.length,
-                      separatorBuilder: (_, __) =>
+                      separatorBuilder: (_, _) =>
                           const SizedBox(height: AppSpacing.lg),
                       itemBuilder: (_, i) => StreamBlockView(block: blocks[i]),
                     ),

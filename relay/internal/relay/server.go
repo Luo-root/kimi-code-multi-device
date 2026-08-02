@@ -3,16 +3,17 @@ package relay
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/acp"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/bark"
+	"github.com/Luo-root/kimi-code-multi-device/relay/internal/config"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/permit"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/replay"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/risk"
@@ -28,7 +29,12 @@ type Relay struct {
 	bark   *bark.Notifier
 	permit *permit.Manager
 
-	// 许可裁决配置
+	// 配置（TOML 文件 + App 热更新）。cfgMu 保护 cfg/permTimeout/autoPassNonCritical。
+	cfg     *config.Config
+	cfgPath string
+	cfgMu   sync.RWMutex
+
+	// 许可裁决配置（运行时热切换）
 	permTimeout         time.Duration // manual 模式超时阈值，默认 5 分钟
 	autoPassNonCritical bool          // §10 3.5 非关键超时自动放行开关，默认关
 
@@ -46,26 +52,31 @@ type client struct {
 }
 
 func New() *Relay {
+	cfgPath := config.Path()
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		log.Printf("[relay] 配置加载失败，用默认值: %v", err)
+	}
+	// 首次启动生成默认模板：可人工编辑，也可在 App 设置页改。
+	if _, statErr := os.Stat(cfgPath); os.IsNotExist(statErr) {
+		if serr := config.Save(cfgPath, cfg); serr != nil {
+			log.Printf("[relay] 生成默认配置失败: %v", serr)
+		} else {
+			log.Printf("[relay] 已生成默认配置 %s（可在 App 设置页或直接编辑）", cfgPath)
+		}
+	}
 	r := &Relay{
+		cfg:                 cfg,
+		cfgPath:             cfgPath,
 		store:               session.New(),
 		kimiHome:            replay.DefaultHome(),
 		clients:             map[*client]bool{},
-		bark:                bark.New(),
-		permTimeout:         permTimeoutFromEnv(),
-		autoPassNonCritical: os.Getenv("PERM_AUTO_PASS_NONCRITICAL") == "1",
+		bark:                bark.New(cfg.Bark.URL),
+		permTimeout:         time.Duration(cfg.Permission.TimeoutSeconds) * time.Second,
+		autoPassNonCritical: cfg.Permission.AutoPassNonCritical,
 	}
 	r.permit = permit.New(r.onPermTimeout)
 	return r
-}
-
-// permTimeoutFromEnv 读 PERM_TIMEOUT_SECONDS，默认 300s（5 分钟）。
-func permTimeoutFromEnv() time.Duration {
-	if v := os.Getenv("PERM_TIMEOUT_SECONDS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return time.Duration(n) * time.Second
-		}
-	}
-	return 5 * time.Minute
 }
 
 func (r *Relay) Start() error {
@@ -235,7 +246,9 @@ func (r *Relay) onPermission(sid string, id json.RawMessage, params json.RawMess
 		log.Printf("[relay] plan 模式出现工具调用，拒绝 sid=%s: %s", sid, command)
 		r.respondPermission(id, "reject")
 	default: // manual / default —— 哨兵在场
+		r.cfgMu.RLock()
 		deadline := time.Now().Add(r.permTimeout)
+		r.cfgMu.RUnlock()
 		r.permit.Register(sid, id, deadline, critical)
 		r.broadcast(Env{
 			Type:      DownPermRequest,
@@ -261,9 +274,12 @@ func (r *Relay) respondPermission(id json.RawMessage, optionID string) {
 
 // onPermTimeout 超时未决：按策略代答（默认拒绝；非关键+开关开则放行）+ 广播失效 + 门铃。
 func (r *Relay) onPermTimeout(sid string, id json.RawMessage, critical bool) {
+	r.cfgMu.RLock()
+	autoPass := r.autoPassNonCritical
+	r.cfgMu.RUnlock()
 	optionID := "reject"
 	note := "一条命令已超时拒绝"
-	if !critical && r.autoPassNonCritical {
+	if !critical && autoPass {
 		optionID = "approve_once"
 		note = "一条非关键命令已超时自动放行"
 	}
@@ -385,6 +401,47 @@ func (r *Relay) sendErr(sid, msg string) {
 	r.broadcast(Env{Type: DownRelayError, SessionID: sid, Payload: mustJSON(DownRelayErrorPayload{Message: msg})})
 }
 
+// relayConfig 组装中继运行配置快照（snapshot 时随下行下发，端侧设置页据此诚实展示）。
+func (r *Relay) relayConfig() DownRelayConfigPayload {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
+	return r.relayConfigLocked()
+}
+
+// relayConfigLocked 组装配置快照，调用方须已持有 cfgMu（读或写）。
+func (r *Relay) relayConfigLocked() DownRelayConfigPayload {
+	return DownRelayConfigPayload{
+		BarkURL:             r.cfg.Bark.URL,
+		BarkEnabled:         r.bark.Enabled(),
+		PermTimeoutSeconds:  r.cfg.Permission.TimeoutSeconds,
+		AutoPassNonCritical: r.cfg.Permission.AutoPassNonCritical,
+		ConfigPath:          r.cfgPath,
+	}
+}
+
+// applyConfig 应用端侧 config.set：更新内存配置 + 热切换 + 写回文件 + 广播新快照。
+func (r *Relay) applyConfig(p UpConfigSetPayload) error {
+	r.cfgMu.Lock()
+	defer r.cfgMu.Unlock()
+	if p.BarkURL != nil {
+		r.cfg.Bark.URL = *p.BarkURL
+		r.bark.Configure(*p.BarkURL)
+	}
+	if p.PermTimeoutSeconds != nil {
+		r.cfg.Permission.TimeoutSeconds = *p.PermTimeoutSeconds
+		r.permTimeout = time.Duration(*p.PermTimeoutSeconds) * time.Second
+	}
+	if p.AutoPassNonCritical != nil {
+		r.cfg.Permission.AutoPassNonCritical = *p.AutoPassNonCritical
+		r.autoPassNonCritical = *p.AutoPassNonCritical
+	}
+	if err := config.Save(r.cfgPath, r.cfg); err != nil {
+		return fmt.Errorf("config save: %w", err)
+	}
+	r.broadcast(Env{Type: DownRelayConfig, Payload: mustJSON(r.relayConfigLocked())})
+	return nil
+}
+
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
@@ -453,6 +510,8 @@ func (r *Relay) snapshot(c *client) {
 		state = "degraded"
 	}
 	r.sendBlocking(c, Env{Type: DownRelayState, Payload: mustJSON(DownRelayStatePayload{State: state})})
+	// 下发运行配置快照，端侧设置页展示真实值（不诚实即一票否决）。
+	r.sendBlocking(c, Env{Type: DownRelayConfig, Payload: mustJSON(r.relayConfig())})
 	// 补发在跑会话的 busy，重连后「停」可见性正确。
 	for _, sid := range r.store.BusySIDs() {
 		r.sendBlocking(c, Env{Type: DownSessionBusy, SessionID: sid, Payload: mustJSON(DownSessionBusyPayload{Busy: true})})
@@ -562,6 +621,12 @@ func (r *Relay) handleUp(c *client, data []byte) {
 		r.acp.DebugKill()
 	case UpListSessions:
 		go r.listSessions()
+	case UpConfigSet:
+		var s UpConfigSetPayload
+		_ = json.Unmarshal(e.Payload, &s)
+		if err := r.applyConfig(s); err != nil {
+			r.sendErr("", "config.set: "+err.Error())
+		}
 	case UpOpenHistory:
 		var o UpOpenHistoryPayload
 		_ = json.Unmarshal(e.Payload, &o)

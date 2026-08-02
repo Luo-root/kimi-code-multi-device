@@ -252,6 +252,12 @@ class _HomeShellState extends State<HomeShell> {
     _store.resolvePermission(p);
   }
 
+  /// 保存配置（config.set）：中继应用 + 写回配置文件；本地乐观更新，回执覆盖。
+  void _saveConfig(Map<String, dynamic> patch) {
+    _client.send('config.set', payload: patch);
+    _store.applyRelayConfig(patch);
+  }
+
   void _openSettings() => showModalBottomSheet(
         context: context,
         isScrollControlled: true,
@@ -263,6 +269,7 @@ class _HomeShellState extends State<HomeShell> {
           store: _store,
           relayUrl: _relayUrl,
           effortLabel: _effortLabel[_effortId] ?? _effortId,
+          onSaveConfig: _saveConfig,
           onReconnect: (url) {
             Navigator.of(context).pop();
             _client.disconnect();
@@ -745,7 +752,6 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
     final cur = _curModel;
     var level = 0;
     var selProv = _provOf(cur);
-    var selModel = cur;
     final box = context.findRenderObject() as RenderBox;
     final off = box.localToGlobal(Offset.zero);
 
@@ -788,7 +794,7 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    _header(level, selProv, selModel, setOverlay, () {
+                    _header(level, selProv, setOverlay, () {
                       setOverlay(() {
                         if (level > 0) level--;
                       });
@@ -834,9 +840,9 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
     super.dispose();
   }
 
-  Widget _header(int level, String selProv, String selModel,
+  Widget _header(int level, String selProv,
       StateSetter setOverlay, VoidCallback onBack) {
-    final titles = ['Provider', selProv, _effortName(selModel)];
+    final titles = ['Provider', selProv, '思考深度'];
     return Container(
       padding: const EdgeInsets.fromLTRB(8, 6, 14, 6),
       decoration: const BoxDecoration(
@@ -869,13 +875,6 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
         ],
       ),
     );
-  }
-
-  String _effortName(String modelVal) {
-    for (final o in _models) {
-      if (o['value'] == modelVal) return o['name']?.toString() ?? modelVal;
-    }
-    return modelVal;
   }
 
   Widget _levelList(
@@ -1004,7 +1003,6 @@ class _SessionDrawer extends StatefulWidget {
   final VoidCallback onNew;
   final VoidCallback onOpenSettings;
   const _SessionDrawer({
-    super.key,
     required this.store,
     required this.onPick,
     required this.onNew,
@@ -1019,7 +1017,9 @@ class _SessionDrawerState extends State<_SessionDrawer> {
   String _q = '';
 
   String _groupKey(SessionMeta m) {
-    final parts = m.cwd.split('/').where((p) => p.isNotEmpty).toList();
+    // Windows 路径用反斜杠分隔，这里兼容两种分隔符。
+    final parts =
+        m.cwd.split(RegExp(r'[/\\]')).where((p) => p.isNotEmpty).toList();
     return parts.length >= 2
         ? '${parts[parts.length - 2]}/${parts.last}'
         : (parts.isNotEmpty ? parts.last : '—');
@@ -1343,7 +1343,7 @@ class _BottomDock extends StatelessWidget {
                   padding: const EdgeInsets.symmetric(
                       horizontal: AppSpacing.pageMargin),
                   itemCount: _chips.length,
-                  separatorBuilder: (_, __) =>
+                  separatorBuilder: (_, _) =>
                       const SizedBox(width: AppSpacing.sm),
                   itemBuilder: (_, i) => Pressable(
                     onTap: () => onChip(_chips[i]),
@@ -1743,12 +1743,13 @@ class _SettingsSheet extends StatefulWidget {
   final String relayUrl;
   final String effortLabel;
   final ValueChanged<String> onReconnect;
+  final ValueChanged<Map<String, dynamic>> onSaveConfig;
   const _SettingsSheet({
-    super.key,
     required this.store,
     required this.relayUrl,
     required this.effortLabel,
     required this.onReconnect,
+    required this.onSaveConfig,
   });
 
   @override
@@ -1758,18 +1759,63 @@ class _SettingsSheet extends StatefulWidget {
 class _SettingsSheetState extends State<_SettingsSheet> {
   late final TextEditingController _urlCtrl =
       TextEditingController(text: widget.relayUrl);
-  bool _barkOn = true;
-  bool _autoPass = false;
+  late final TextEditingController _barkUrlCtrl = TextEditingController();
+  late final TextEditingController _timeoutCtrl = TextEditingController();
+  late bool _autoPass = false;
+  /// 用户动过表单后不再跟随 store 刷新（避免保存回执覆盖编辑中的值）。
+  bool _userEdited = false;
+  VoidCallback? _sub;
+
+  @override
+  void initState() {
+    super.initState();
+    _syncFromStore();
+    _sub = () {
+      if (mounted && !_userEdited) setState(_syncFromStore);
+    };
+    widget.store.addListener(_sub!);
+  }
+
+  void _syncFromStore() {
+    final rc = widget.store.relayConfig;
+    _barkUrlCtrl.text = rc?.barkUrl ?? '';
+    _timeoutCtrl.text = (rc?.permTimeoutSeconds ?? 300).toString();
+    _autoPass = rc?.autoPassNonCritical ?? false;
+  }
 
   @override
   void dispose() {
+    if (_sub != null) widget.store.removeListener(_sub!);
     _urlCtrl.dispose();
+    _barkUrlCtrl.dispose();
+    _timeoutCtrl.dispose();
     super.dispose();
+  }
+
+  /// 保存并应用：把表单值发给中继（写回配置文件 + 热切换），本地乐观更新。
+  void _save() {
+    setState(() => _userEdited = true); // 保存后以服务端回执为准
+    widget.onSaveConfig({
+      'barkUrl': _barkUrlCtrl.text.trim(),
+      'permTimeoutSeconds': int.tryParse(_timeoutCtrl.text.trim()) ?? 300,
+      'autoPassNonCritical': _autoPass,
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('配置已保存并应用',
+            style: AppText.callout.copyWith(color: AppColors.surface)),
+        backgroundColor: AppColors.textPrimary,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        duration: const Duration(milliseconds: 1600),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final h = MediaQuery.of(context).size.height;
+    final rc = widget.store.relayConfig;
     final cfg = widget.store.configOf(widget.store.currentSid);
     final prov = _provOf(_cfgCur(cfg, 'model'));
     final modelOpts = _cfgList(cfg, 'model');
@@ -1872,13 +1918,82 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                         widget.store.relayState == 'connecting'),
                 const SizedBox(height: 22),
                 _group('锁屏门铃'),
-                _tg('Bark 推送', _barkOn, (v) => setState(() => _barkOn = v)),
-                _ro('Bark URL', 'https://api.day.app/••••'),
+                _ro('Bark 推送', '留空则关闭门铃'),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: AppColors.background,
+                    borderRadius: BorderRadius.circular(AppRadius.thumbnail),
+                  ),
+                  child: TextField(
+                    controller: _barkUrlCtrl,
+                    style: AppText.monoCaption,
+                    onChanged: (_) => setState(() => _userEdited = true),
+                    decoration: const InputDecoration(
+                      isCollapsed: true,
+                      border: InputBorder.none,
+                      hintText: 'https://api.day.app/{key}',
+                      hintStyle: AppText.placeholder,
+                      contentPadding: EdgeInsets.symmetric(vertical: 10),
+                    ),
+                  ),
+                ),
                 const SizedBox(height: 22),
                 _group('许可策略'),
-                _tg('非关键超时自动放行', _autoPass,
-                    (v) => setState(() => _autoPass = v)),
-                _ro('超时时长', '5 分钟'),
+                _tg('非关键超时自动放行', _autoPass, (v) {
+                  setState(() {
+                    _userEdited = true;
+                    _autoPass = v;
+                  });
+                }),
+                _ro('超时时长', 'manual 模式到期未决的代答阈值'),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: AppColors.background,
+                    borderRadius: BorderRadius.circular(AppRadius.thumbnail),
+                  ),
+                  child: TextField(
+                    controller: _timeoutCtrl,
+                    style: AppText.monoCaption,
+                    keyboardType: TextInputType.number,
+                    onChanged: (_) => setState(() => _userEdited = true),
+                    decoration: const InputDecoration(
+                      isCollapsed: true,
+                      border: InputBorder.none,
+                      hintText: '秒，如 300',
+                      hintStyle: AppText.placeholder,
+                      contentPadding: EdgeInsets.symmetric(vertical: 10),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Pressable(
+                    onTap: _save,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 9),
+                      decoration: BoxDecoration(
+                        color: AppColors.textPrimary,
+                        borderRadius: BorderRadius.circular(AppRadius.pill),
+                      ),
+                      child: Text('保存并应用',
+                          style: AppText.callout.copyWith(
+                              color: AppColors.surface,
+                              fontWeight: FontWeight.w600)),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                _ro(
+                    '配置文件',
+                    rc?.configPath.isNotEmpty == true
+                        ? rc!.configPath
+                        : '电脑端 relay.toml'),
                 const SizedBox(height: 22),
                 _group('外观'),
                 _ro('主题', '浅色（v1）'),
@@ -2077,7 +2192,7 @@ class _SessionSwitcher extends StatelessWidget {
                 scrollDirection: Axis.horizontal,
                 padding: const EdgeInsets.symmetric(horizontal: 4),
                 itemCount: sids.length,
-                separatorBuilder: (_, __) => const SizedBox(width: 6),
+                separatorBuilder: (_, _) => const SizedBox(width: 6),
                 itemBuilder: (_, i) {
                   final sid = sids[i];
                   return _SessionTab(

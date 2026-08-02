@@ -127,6 +127,45 @@ bool isCriticalCommand(String cmd) {
   return criticalCommandPatterns.any((p) => RegExp(p).hasMatch(lower));
 }
 
+/// 中继运行配置快照（relay.config 下行）。设置页据此展示/编辑真实值，
+/// 避免"看着能改、实际没改"的假设置（诚实原则 §12）。
+class RelayConfig {
+  final bool barkEnabled;
+  final String barkUrl;
+  final int permTimeoutSeconds;
+  final bool autoPassNonCritical;
+  final String configPath;
+  const RelayConfig({
+    required this.barkEnabled,
+    required this.barkUrl,
+    required this.permTimeoutSeconds,
+    required this.autoPassNonCritical,
+    required this.configPath,
+  });
+
+  factory RelayConfig.fromPayload(Map<String, dynamic> p) => RelayConfig(
+        barkEnabled: p['barkEnabled'] == true,
+        barkUrl: p['barkUrl']?.toString() ?? '',
+        permTimeoutSeconds: (p['permTimeoutSeconds'] as num?)?.toInt() ?? 300,
+        autoPassNonCritical: p['autoPassNonCritical'] == true,
+        configPath: p['configPath']?.toString() ?? '',
+      );
+
+  /// 乐观更新：config.set 发出后本地立即反映，回执（relay.config）再以真实值覆盖。
+  RelayConfig copyWith({
+    String? barkUrl,
+    int? permTimeoutSeconds,
+    bool? autoPassNonCritical,
+  }) =>
+      RelayConfig(
+        barkEnabled: barkUrl != null ? barkUrl.isNotEmpty : barkEnabled,
+        barkUrl: barkUrl ?? this.barkUrl,
+        permTimeoutSeconds: permTimeoutSeconds ?? this.permTimeoutSeconds,
+        autoPassNonCritical: autoPassNonCritical ?? this.autoPassNonCritical,
+        configPath: configPath,
+      );
+}
+
 /// 会话元信息（来自 session.list）。
 class SessionMeta {
   final String sessionId;
