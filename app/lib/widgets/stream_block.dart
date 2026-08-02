@@ -7,11 +7,14 @@ import '../theme/app_shadows.dart';
 import '../theme/app_icons.dart';
 import '../widgets/common.dart';
 import 'markdown.dart';
+import 'generating.dart';
 
 /// 渲染一个流块。home_shell 与验证页共用。
 class StreamBlockView extends StatefulWidget {
   final StreamBlock block;
-  const StreamBlockView({super.key, required this.block});
+  /// 是否为当前正在流式追加的末块（用于尾部光标 / 思考中态）。§3 生成状态动效。
+  final bool streaming;
+  const StreamBlockView({super.key, required this.block, this.streaming = false});
 
   @override
   State<StreamBlockView> createState() => _StreamBlockViewState();
@@ -50,11 +53,15 @@ class _StreamBlockViewState extends State<StreamBlockView> {
       );
 
   Widget _textBlock() {
+    final streaming = widget.streaming;
     return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      // 流式时光标落在底部右侧，读作「正在输入」；非流式保持原顶对齐。
+      crossAxisAlignment:
+          streaming ? CrossAxisAlignment.end : CrossAxisAlignment.start,
       children: [
         Expanded(child: MarkdownView(data: widget.block.text)),
         const SizedBox(width: 4),
+        if (streaming) const BlinkingCursor(),
         _copyBtn(widget.block.text),
       ],
     );
@@ -83,6 +90,7 @@ class _StreamBlockViewState extends State<StreamBlockView> {
   }
 
   Widget _think() {
+    final streaming = widget.streaming;
     return Container(
       decoration: BoxDecoration(
         color: AppColors.thinkSoft,
@@ -106,8 +114,17 @@ class _StreamBlockViewState extends State<StreamBlockView> {
                     Icon(_open ? AppIcons.chevronDown : AppIcons.chevronRight,
                         size: 14, color: AppColors.think),
                     const SizedBox(width: 6),
-                    Text('思考',
+                    Text(streaming ? '思考中…' : '思考',
                         style: AppText.callout.copyWith(color: AppColors.think)),
+                    if (streaming) ...[
+                      const SizedBox(width: 6),
+                      const SizedBox(
+                        width: 12,
+                        height: 12,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: AppColors.think),
+                      ),
+                    ],
                   ],
                 ),
               ),

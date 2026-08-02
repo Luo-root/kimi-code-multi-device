@@ -10,6 +10,7 @@ import '../theme/app_shadows.dart';
 import '../theme/app_icons.dart';
 import '../widgets/common.dart';
 import '../widgets/stream_block.dart';
+import '../widgets/generating.dart';
 
 // ---------- 常量 ----------
 
@@ -324,6 +325,11 @@ class _HomeShellState extends State<HomeShell> {
     final dockH = _dockH; // 动态测量，替代写死的 360/230/150
     // §13「停」随 AI 输出态：busy（session/prompt 进行中）时显眼，输出完退场。
     final running = sid != null && _store.busyOf(sid);
+    // §3 生成状态动效：AI 已接到消息但尚未产出任何内容（等待首 token）时显示呼吸动画。
+    final lastKind = blocks.isNotEmpty ? blocks.last.kind : null;
+    final aiStarted =
+        lastKind != null && lastKind != BlockKind.user; // 有 think/text/tool 即视为已开始
+    final showWaiting = running && !aiStarted;
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -381,15 +387,40 @@ class _HomeShellState extends State<HomeShell> {
                               8,
                               AppSpacing.pageMargin,
                               dockH),
-                          itemCount: blocks.length,
-                          itemBuilder: (_, i) => Padding(
-                            padding: EdgeInsets.only(
-                                bottom: i == blocks.length - 1
-                                    ? 0
-                                    : AppSpacing.lg),
-                            child: StreamBlockView(block: blocks[i]),
-                          ),
+                          itemCount: blocks.length + (showWaiting ? 1 : 0),
+                          itemBuilder: (_, i) {
+                            if (i < blocks.length) {
+                              return Padding(
+                                padding: EdgeInsets.only(
+                                    bottom: i == blocks.length - 1
+                                        ? 0
+                                        : AppSpacing.lg),
+                                child: StreamBlockView(
+                                  block: blocks[i],
+                                  streaming: running && i == blocks.length - 1,
+                                ),
+                              );
+                            }
+                            // 等待首 token：三点呼吸动画（§3.2-1 / §3.1-2）。
+                            return const Padding(
+                              padding: EdgeInsets.only(
+                                  left: AppSpacing.pageMargin, top: AppSpacing.sm),
+                              child: BreathingDots(),
+                            );
+                          },
                         ),
+                  // §3.2-4 全局生成状态条：busy 全程 2px indeterminate 进度，输出完收起。
+                  if (running)
+                    const Positioned(
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                      child: LinearProgressIndicator(
+                        backgroundColor: Colors.transparent,
+                        color: AppColors.accent,
+                        minHeight: 2,
+                      ),
+                    ),
                   Positioned(
                     left: 0,
                     right: 0,
@@ -1553,17 +1584,20 @@ class _InputBar extends StatelessWidget {
           const SizedBox(width: AppSpacing.sm),
           // §13「停」可见性随状态：流式中亮且显眼（占发送位），空闲时是发送。
           running
-              ? Pressable(
-                  onTap: onStop,
-                  child: Container(
-                    width: 32,
-                    height: 32,
-                    decoration: const BoxDecoration(
-                      color: AppColors.reject,
-                      shape: BoxShape.circle,
+              ? PulseWrapper(
+                  active: running,
+                  child: Pressable(
+                    onTap: onStop,
+                    child: Container(
+                      width: 32,
+                      height: 32,
+                      decoration: const BoxDecoration(
+                        color: AppColors.reject,
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(AppIcons.stop,
+                          size: 14, color: AppColors.surface),
                     ),
-                    child:
-                        const Icon(AppIcons.stop, size: 14, color: AppColors.surface),
                   ),
                 )
               : Pressable(

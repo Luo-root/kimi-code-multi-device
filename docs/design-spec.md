@@ -713,4 +713,40 @@ agent 忙时又发一句 Kimi 怎么处理，v0 没测；v1 输入框始终可�
 
 ---
 
+## §E UX 改进指南实施（按优先级逐项，2026-08-02 起）
+
+依据 `docs/UX-IMPROVEMENT-GUIDE.md` 优先级排序，逐问题修复、每修一处即向你汇报。
+
+### E1 · 第三章 生成状态动效（P0，已完成）
+- 新增 `widgets/generating.dart`：`BreathingDots`（三点交错呼吸，等首 token）、`BlinkingCursor`（流式文本尾部 accent 竖线光标）、`PulseWrapper`（停止按钮 pulse 1.0↔1.06 / 2s）。
+- `StreamBlockView` 增加 `streaming` 参数：末块为 text 时追加 `BlinkingCursor`；为 think 时标题变「思考中…」+ 旋转指示。
+- `home_shell`：计算 `showWaiting = running && 末块非 AI 内容` → 列表末尾追加 `BreathingDots`；列表末块传 `streaming`；聊天区顶部 busy 时显示 2px `LinearProgressIndicator`（全局生成状态条）；停止按钮包 `PulseWrapper`。
+- 验证：`flutter analyze` 0 / `flutter test` 3/3。
+
+> 待办（按优先级，逐条汇报后推进）：busy 时发送无反馈(§5.1-2) · 复制按钮渐进披露(第二章) · 回到底部 FAB+新消息提示(§4.2) · 菜单出入场+返回键(§1) · 批准卡(第六章) · 触控目标(§10.1-1) · 错误可见(§7.2-3) · Haptic(第八章) · 暗色基础(§10.2-3)。
+
+---
+
 *SENTINEL · 产品设计定稿 v1.0 · 2026-07-31 · 实测基线 Kimi Code CLI 0.31.0 / ACP · 自用 · 单人 · 自托管*
+## §F E1 迭代：kimi-code 风格加载动效（v1.2.2 · 2026-08-02）
+
+用户反馈 E1 三点呼吸「简陋」，要求等首 token 改 kimi-code 风格、旁附「kimi-code」字样（液态流转+呼吸）、思考态同款。
+- 参考 kimi-code 官方 `packages/pi-tui` 的 `Loader` 组件：盲文旋转帧 `["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]`，间隔 80ms，旁附 "Thinking..."（spinner 用 accent 高亮）。
+- 新增 `app/lib/widgets/kimi_loader.dart`：`BrailleSpinner`（原样复刻盲文帧，10×80ms=800ms 循环）、`LiquidText`（同色相提亮/压暗的高光带左右往复流转 + 透明度/微缩放呼吸）、`KimiCodeWordmark`（"kimi-code" 液态呼吸字样）、`KimiCodeLoader`（spinner + 字样）。
+- `home_shell` 等待首 token 改 `KimiCodeLoader()`（左对齐 AI 文本列）；`stream_block` 思考态由 `CircularProgressIndicator` 改为 `BrailleSpinner` + 液态呼吸「思考中…」；`generating.dart` 移除废弃 `BreathingDots`。
+- 验证：`flutter analyze` 0、`flutter test` 3/3。
+
+## §F2 E1 再迭代：蓝色小头 logo 作指示器（v1.2.3 · 2026-08-02）
+
+用户澄清：等首 token 的指示要换成 kimi-code 官方「蓝色小头」logo（圆角蓝方块+白色 Kimi 字标），旁附「kimi-code」液态呼吸字样；思考态同款。
+- 抓取 Kimi 官方 SVG 真实路径（viewBox 0 0 512，蓝头 #027aff 渐变 + 白色字标 path）。新增 `flutter_svg: ^2.0.10`。
+- `kimi_loader.dart` 重写：`KimiLogo`（SvgPicture 渲染官方 logo，蓝头渐变 + 轻微呼吸缩放 0.93↔1.0）；`KimiCodeLoader` = 蓝色小头 + 液态呼吸「kimi-code」；思考态由 `BrailleSpinner` 改为 `KimiLogo(size:18)+液态呼吸「思考中…」`；移除废弃 `BrailleSpinner`。
+- 验证：`flutter pub get` ok、`flutter analyze` 0、`flutter test` 3/3。
+
+## §F3 E1 排版修正：WorkBuddy 消息式头部（v1.2.4 · 2026-08-02）
+
+用户反馈蓝色小头指示器「太丑」，并给出 WorkBuddy 截图示例：每次 AI 回答顶部应像聊天消息一样，左侧圆形头像、右侧「kimi-code」标题；标题做液态流转，思考块仅「思考」二字做液态流转。
+- `kimi_loader.dart` 调整：`KimiAvatar`（ClipOval 圆形头像）、`AssistantHeader`（头像 +「kimi-code」，streaming 时字样液态流转，否则静态文字）、`KimiCodeLoader` 退化为 `AssistantHeader(streaming: true)`。
+- `stream_block.dart`：`_textBlock()` 改为左侧头像 + 右侧标题 + 正文（WorkBuddy 消息排版）；`_think()` 标题在 streaming 时改用 `LiquidText('思考')`，不再显示「思考中…」/ spinner。
+- `home_shell.dart`：等待首 token 的占位直接显示 `KimiCodeLoader()`（即 AI 消息头部，头像 + 液态「kimi-code」）。
+- 验证：`flutter analyze` 0、`flutter test` 3/3。
