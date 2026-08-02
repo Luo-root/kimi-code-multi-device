@@ -23,6 +23,8 @@ const (
 	DownSessionList    = "session.list"
 	DownSessionHistory = "session.history" // 历史回放内容块
 	DownRelayError     = "relay.error"
+	DownSessionBusy    = "session.busy"   // 该会话是否有 prompt 进行中（驱动「停」）
+	DownSessionClosed  = "session.closed" // 某活跃会话被关闭，端侧移除 tab
 )
 
 // 上行 type
@@ -37,6 +39,7 @@ const (
 	UpDebugKill    = "debug_kill_kimi"
 	UpListSessions = "list_sessions"
 	UpOpenHistory  = "open_history"
+	UpCloseSession = "close_session"
 )
 
 // 上行 payload
@@ -83,6 +86,9 @@ type DownSessionHistoryPayload struct {
 }
 type DownRelayStatePayload struct {
 	State string `json:"state"`
+}
+type DownSessionBusyPayload struct {
+	Busy bool `json:"busy"`
 }
 type DownRelayErrorPayload struct {
 	Message string `json:"message"`

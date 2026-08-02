@@ -20,6 +20,12 @@ class SessionStore extends ChangeNotifier {
   /// 单会话通常 0 或 1 条；多会话各自独立，故用 `Map<sid, List>`。
   final Map<String, List<PermissionRequest>> _pending = {};
 
+  /// 每会话 busy：session/prompt 进行中（AI 还在输出）。中继下发 session.busy。
+  final Map<String, bool> _busy = {};
+
+  /// 该会话是否在跑（AI 还没输出完）——驱动「停」可见性与 running 状态点。
+  bool busyOf(String? sid) => sid != null && _busy[sid] == true;
+
   List<SessionMeta> get history => List.unmodifiable(_history);
 
   String? currentSid;
@@ -81,23 +87,12 @@ class SessionStore extends ChangeNotifier {
   Map<String, List<PermissionRequest>> get allPending =>
       Map.unmodifiable(_pending);
 
-  /// 会话状态点：🟠待批准 优先，其次 🟢在跑，否则 idle（不显点）。
+  /// 会话状态点：🟠待批准 优先，其次 🟢在跑（busy），否则 idle（不显点）。
   /// 'pending' / 'running' / 'idle'
   String sessionStatus(String sid) {
     if ((_pending[sid]?.isNotEmpty) ?? false) return 'pending';
-    final blocks = _streams[sid];
-    if (blocks == null || blocks.isEmpty) return 'idle';
-    final last = blocks.last;
-    if (last.kind == BlockKind.tool) {
-      return (last.status == ToolStatus.running ||
-              last.status == ToolStatus.pending)
-          ? 'running'
-          : 'idle';
-    }
-    // think / text 末块视为正在流式产出。
-    return (last.kind == BlockKind.think || last.kind == BlockKind.text)
-        ? 'running'
-        : 'idle';
+    if (_busy[sid] == true) return 'running';
+    return 'idle';
   }
 
   /// 处理一条中继下行消息。
@@ -113,6 +108,9 @@ class SessionStore extends ChangeNotifier {
           currentSid ??= sid;
         }
         notifyListeners();
+      case 'session.busy':
+        if (sid != null) _busy[sid] = payload['busy'] == true;
+        notifyListeners();
       case 'session.update':
         if (sid != null) _applyUpdate(sid, payload);
         _touchSynced();
@@ -125,6 +123,14 @@ class SessionStore extends ChangeNotifier {
         notifyListeners();
       case 'permission.invalidate':
         _pending.clear();
+        notifyListeners();
+      case 'session.closed':
+        if (sid != null) {
+          _activeSids.remove(sid);
+          if (currentSid == sid) {
+            currentSid = _activeSids.isNotEmpty ? _activeSids.last : null;
+          }
+        }
         notifyListeners();
       case 'relay.state':
         _kimiHealth = payload['state']?.toString() ?? 'ok';
@@ -266,6 +272,17 @@ class SessionStore extends ChangeNotifier {
   void setCurrent(String sid) {
     currentSid = sid;
     if (!_activeSids.contains(sid)) _activeSids.add(sid);
+    notifyListeners();
+  }
+
+  /// 关闭一个活跃会话（来自顶部切换器的 × 按钮，乐观移除）。
+  /// 中继随后推 session.closed 时再做一次幂等移除。
+  void removeActive(String sid) {
+    if (!_activeSids.contains(sid)) return;
+    _activeSids.remove(sid);
+    if (currentSid == sid) {
+      currentSid = _activeSids.isNotEmpty ? _activeSids.last : null;
+    }
     notifyListeners();
   }
 

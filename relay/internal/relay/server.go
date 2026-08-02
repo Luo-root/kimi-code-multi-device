@@ -341,6 +341,10 @@ func (r *Relay) restartKimi() {
 		if err != nil {
 			log.Printf("[relay] resume %s 失败: %v", sid, err)
 			r.sendErr(sid, "会话恢复失败，上下文可能丢失: "+err.Error())
+			// 失效会话从活跃表摘除：否则 snapshot() 会把它再次广播给端侧，
+			// 造成死 tab，用户一发消息就被 Kimi 拒（Unknown sessionId）。
+			r.store.Remove(sid)
+			r.broadcast(Env{Type: DownSessionClosed, SessionID: sid})
 			continue
 		}
 		var res struct {
@@ -449,6 +453,10 @@ func (r *Relay) snapshot(c *client) {
 		state = "degraded"
 	}
 	r.sendBlocking(c, Env{Type: DownRelayState, Payload: mustJSON(DownRelayStatePayload{State: state})})
+	// 补发在跑会话的 busy，重连后「停」可见性正确。
+	for _, sid := range r.store.BusySIDs() {
+		r.sendBlocking(c, Env{Type: DownSessionBusy, SessionID: sid, Payload: mustJSON(DownSessionBusyPayload{Busy: true})})
+	}
 }
 
 func (r *Relay) handleUp(c *client, data []byte) {
@@ -474,7 +482,17 @@ func (r *Relay) handleUp(c *client, data []byte) {
 		var p UpPromptPayload
 		_ = json.Unmarshal(e.Payload, &p)
 		sid := e.SessionID
+		// 防御：sid 不在活跃表（Kimi 不认识 / 已失效）时不再透传给 Kimi，
+		// 否则 Kimi 报 Unknown sessionId 且端侧还卡在死 tab。直接报错并通知端侧移除。
+		if sid == "" || !r.store.Has(sid) {
+			r.sendErr(sid, "会话不存在或已失效，消息未发送")
+			r.broadcast(Env{Type: DownSessionClosed, SessionID: sid})
+			return
+		}
 		go func() {
+			// busy 开始：AI 还在输出，驱动端「停」可见。
+			r.store.SetBusy(sid, true)
+			r.broadcast(Env{Type: DownSessionBusy, SessionID: sid, Payload: mustJSON(DownSessionBusyPayload{Busy: true})})
 			start := time.Now()
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			defer cancel()
@@ -483,6 +501,9 @@ func (r *Relay) handleUp(c *client, data []byte) {
 				"prompt":    []any{map[string]any{"type": "text", "text": p.Text}},
 			})
 			elapsed := time.Since(start)
+			// busy 结束：输出完毕（成功或出错都算跑完），「停」退场。
+			r.store.SetBusy(sid, false)
+			r.broadcast(Env{Type: DownSessionBusy, SessionID: sid, Payload: mustJSON(DownSessionBusyPayload{Busy: false})})
 			if err != nil {
 				r.sendErr(sid, "prompt: "+err.Error())
 				// §04 支柱02 时刻②：跑完（出错）也告知。
@@ -545,6 +566,21 @@ func (r *Relay) handleUp(c *client, data []byte) {
 		var o UpOpenHistoryPayload
 		_ = json.Unmarshal(e.Payload, &o)
 		go r.openHistory(o.SessionID, o.CWD)
+	case UpCloseSession:
+		sid := e.SessionID
+		if sid == "" {
+			return
+		}
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			// 尽力关闭 Kimi 侧会话（ACP 不支持则忽略错误，端侧 tab 仍移除）。
+			if _, err := r.acp.Request(ctx, "session/close", map[string]any{"sessionId": sid}); err != nil {
+				log.Printf("[relay] session/close %s 失败（忽略）: %v", sid, err)
+			}
+			r.store.Remove(sid)
+			r.broadcast(Env{Type: DownSessionClosed, SessionID: sid})
+		}()
 	}
 }
 

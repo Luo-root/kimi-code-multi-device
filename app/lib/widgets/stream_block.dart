@@ -5,6 +5,8 @@ import '../theme/app_text_styles.dart';
 import '../theme/app_dimens.dart';
 import '../theme/app_shadows.dart';
 import '../theme/app_icons.dart';
+import '../widgets/common.dart';
+import 'markdown.dart';
 
 /// 渲染一个流块。home_shell 与验证页共用。
 class StreamBlockView extends StatefulWidget {
@@ -26,24 +28,57 @@ class _StreamBlockViewState extends State<StreamBlockView> {
       case BlockKind.think:
         return _think();
       case BlockKind.text:
-        return Text(widget.block.text, style: AppText.body);
+        // AI 输出按 Markdown 渲染（标题/加粗/行内码/代码块/列表…）。
+        return _textBlock();
       case BlockKind.tool:
         return _tool();
     }
   }
 
-  Widget _user() {
-    return Align(
-      alignment: Alignment.centerRight,
-      child: Container(
-        constraints: const BoxConstraints(maxWidth: 260),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          color: AppColors.accentSoft,
-          borderRadius: BorderRadius.circular(16),
+  /// 复制按钮（消息 / 代码块 / 命令共用）。
+  Widget _copyBtn(String text) => Pressable(
+        onTap: () => copyToClipboard(ScaffoldMessenger.of(context), text),
+        child: Container(
+          width: 30,
+          height: 30,
+          decoration: BoxDecoration(
+            color: AppColors.keyCap,
+            shape: BoxShape.circle,
+          ),
+          child: const Icon(AppIcons.copy, size: 15, color: AppColors.textSecondary),
         ),
-        child: Text(widget.block.text, style: AppText.body),
-      ),
+      );
+
+  Widget _textBlock() {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(child: MarkdownView(data: widget.block.text)),
+        const SizedBox(width: 4),
+        _copyBtn(widget.block.text),
+      ],
+    );
+  }
+
+  Widget _user() {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.end,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Flexible(
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 260),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: AppColors.accentSoft,
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Text(widget.block.text, style: AppText.body),
+          ),
+        ),
+        const SizedBox(width: 6),
+        _copyBtn(widget.block.text),
+      ],
     );
   }
 
@@ -178,14 +213,32 @@ class _StreamBlockViewState extends State<StreamBlockView> {
                     if (_open && (b.command?.isNotEmpty ?? false))
                       Padding(
                         padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-                        child: Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            color: AppColors.background,
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Text(b.command!, style: AppText.mono),
+                        // 命令用深色代码块呈现（与 Markdown 代码块一致），等宽、可选中、横向滚动。
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Expanded(
+                              child: Container(
+                                width: double.infinity,
+                                decoration: BoxDecoration(
+                                  color: AppColors.textPrimary,
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: SingleChildScrollView(
+                                  scrollDirection: Axis.horizontal,
+                                  padding: const EdgeInsets.all(10),
+                                  child: SelectableText(
+                                    b.command!,
+                                    style: AppText.mono.copyWith(
+                                        color: const Color(0xFFECECEF),
+                                        height: 1.5),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            _copyBtn(b.command!),
+                          ],
                         ),
                       ),
                     if (_open && b.output.isNotEmpty)

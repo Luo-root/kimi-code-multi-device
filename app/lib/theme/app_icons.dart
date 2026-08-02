@@ -14,7 +14,6 @@ abstract final class AppIcons {
   static const IconData chevronRight = LucideIcons.chevron_right;
   static const IconData chevronDown = LucideIcons.chevron_down;
   static const IconData chevronUp = LucideIcons.chevron_up;
-  static const IconData palette = LucideIcons.palette; // 开发期跳 showcase
   static const IconData folder = LucideIcons.folder; // 工作区分组
   static const IconData modelChip = LucideIcons.cpu; // 模型选择触发器
   static const IconData thinking = LucideIcons.sparkles; // 思考强度
@@ -35,4 +34,5 @@ abstract final class AppIcons {
   // 流内容
   static const IconData terminal = LucideIcons.terminal;
   static const IconData check = LucideIcons.check;
+  static const IconData copy = LucideIcons.copy; // 复制消息 / 代码 / 命令
 }

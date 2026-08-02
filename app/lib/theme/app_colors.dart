@@ -12,14 +12,15 @@ abstract final class AppColors {
   static const Color hairline = Color(0xFFEEF0F2);
 
   // ---- 语义色（5%，克制，仅决策点）----
-  static const Color accent = Color(0xFF007AFF); // 选中/C位/链接
+  // accent 对齐 Kimi（月之暗面）官方标志性紫色主题（参考 kimi.com / kimi-code）。
+  static const Color accent = Color(0xFF6B5CE7); // Kimi 紫：选中/C位/链接
   static const Color approve = Color(0xFF34C759); // 批准/在线/完成
   static const Color reject = Color(0xFFFF3B30); // 拒绝/关键命令/失败
   static const Color warning = Color(0xFFFF9500); // 降级/将睡/待批准
   static const Color think = Color(0xFF8E8E93); // 思考（中性，冷静）
 
   // ---- 语义色淡底（ARGB 直定义，避免废弃 API）----
-  static const Color accentSoft = Color(0x1A007AFF); // ~10%
+  static const Color accentSoft = Color(0x1A6B5CE7); // ~10% Kimi 紫淡底
   static const Color approveSoft = Color(0x1F34C759); // ~12%
   static const Color rejectSoft = Color(0x1AFF3B30); // ~10%
   static const Color warningSoft = Color(0x1FFF9500); // ~12%
