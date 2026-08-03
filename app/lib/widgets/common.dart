@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:hux/hux.dart';
 import 'package:flutter/services.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
@@ -7,21 +8,15 @@ import '../theme/app_dimens.dart';
 import '../theme/app_shadows.dart';
 import '../theme/app_icons.dart';
 
-/// 复制到剪贴板并给出轻量 toast 反馈。供消息 / 代码块 / 命令复制复用。
-/// 入参用 ScaffoldMessengerState（而非 BuildContext），便于异步回调里安全使用。
-void copyToClipboard(ScaffoldMessengerState messenger, String text) {
+/// 复制到剪贴板并给出轻量 toast 反馈（hux 语义色）。供消息 / 代码块 / 命令复制复用。
+void copyToClipboard(BuildContext context, String text) {
   if (text.isEmpty) return;
   Clipboard.setData(ClipboardData(text: text));
   HapticFeedback.selectionClick(); // §UX-8.2-2：复制 = .selection。
-  messenger.showSnackBar(
-    SnackBar(
-      content: Text('已复制',
-          style: AppText.callout.copyWith(color: AppColors.surface)),
-      backgroundColor: AppColors.textPrimary,
-      behavior: SnackBarBehavior.floating,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      duration: const Duration(milliseconds: 1400),
-    ),
+  context.showHuxSnackbar(
+    message: '已复制',
+    variant: HuxSnackbarVariant.success,
+    duration: const Duration(milliseconds: 1400),
   );
 }
 
@@ -31,7 +26,9 @@ void copyToClipboard(ScaffoldMessengerState messenger, String text) {
 class CopyButton extends StatefulWidget {
   final String text;
   final bool dark;
-  const CopyButton({super.key, required this.text, this.dark = false});
+  final bool plain;
+  const CopyButton(
+      {super.key, required this.text, this.dark = false, this.plain = false});
 
   @override
   State<CopyButton> createState() => _CopyButtonState();
@@ -60,12 +57,14 @@ class _CopyButtonState extends State<CopyButton> {
 
   @override
   Widget build(BuildContext context) {
-    final bg = widget.dark
-        ? const Color(0x33FFFFFF)
-        : (_done ? AppColors.approveSoft : AppColors.keyCap);
+    final bg = widget.plain
+        ? Colors.transparent
+        : (widget.dark
+            ? const Color(0x33FFFFFF)
+            : (_done ? AppColors.approveSoft : AppColors.keyCapOf(context)));
     final fg = widget.dark
         ? (_done ? AppColors.approve : const Color(0xFFC7C7CC))
-        : (_done ? AppColors.approve : AppColors.textSecondary);
+        : (_done ? AppColors.approve : AppColors.textSecondaryOf(context));
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: _copy,
@@ -377,7 +376,7 @@ class _ChipDropdownState extends State<ChipDropdown> {
     return Container(
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
-        color: AppColors.surface,
+        color: AppColors.surfaceOf(context),
         borderRadius: BorderRadius.circular(AppRadius.card),
         boxShadow: AppShadows.popup,
       ),
@@ -438,7 +437,7 @@ class _ChipDropdownState extends State<ChipDropdown> {
         duration: const Duration(milliseconds: 120),
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
-          color: _triggerDown ? const Color(0xFFDADAE0) : AppColors.keyCap,
+          color: _triggerDown ? const Color(0xFFDADAE0) : AppColors.keyCapOf(context),
           borderRadius: BorderRadius.circular(AppRadius.pill),
         ),
         // 触发器文字用 Flexible+ellipsis，窄屏被外层 Flexible 约束时截断。
@@ -446,13 +445,13 @@ class _ChipDropdownState extends State<ChipDropdown> {
           mainAxisSize: MainAxisSize.min,
           children: [
             if (widget.triggerIcon != null) ...[
-              Icon(widget.triggerIcon, size: 12, color: AppColors.textSecondary),
+              Icon(widget.triggerIcon, size: 12, color: AppColors.textSecondaryOf(context)),
               const SizedBox(width: 5),
             ],
             Flexible(
               child: Text(
                 widget.triggerLabel,
-                style: AppText.callout.copyWith(color: AppColors.textPrimary),
+                style: AppText.callout.copyWith(color: AppColors.textPrimaryOf(context)),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -461,7 +460,7 @@ class _ChipDropdownState extends State<ChipDropdown> {
             Icon(
               _open ? AppIcons.chevronUp : AppIcons.chevronDown,
               size: 12,
-              color: AppColors.textSecondary,
+              color: AppColors.textSecondaryOf(context),
             ),
           ],
         ),
@@ -501,14 +500,14 @@ class _DropdownItemState extends State<_DropdownItem> {
         margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         decoration: BoxDecoration(
-          color: _down ? AppColors.keyCap : Colors.transparent,
+          color: _down ? AppColors.keyCapOf(context) : Colors.transparent,
           borderRadius: BorderRadius.circular(12),
         ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             if (widget.option.icon != null) ...[
-              Icon(widget.option.icon, size: 16, color: AppColors.textSecondary),
+              Icon(widget.option.icon, size: 16, color: AppColors.textSecondaryOf(context)),
               const SizedBox(width: 10),
             ],
             Expanded(
@@ -519,7 +518,7 @@ class _DropdownItemState extends State<_DropdownItem> {
                   Text(
                     widget.option.label,
                     style: AppText.body.copyWith(
-                      color: AppColors.textPrimary,
+                      color: AppColors.textPrimaryOf(context),
                       fontWeight: FontWeight.w600,
                     ),
                   ),
@@ -531,9 +530,9 @@ class _DropdownItemState extends State<_DropdownItem> {
               ),
             ),
             if (widget.selected)
-              const Padding(
-                padding: EdgeInsets.only(left: 10),
-                child: Icon(AppIcons.check, size: 16, color: AppColors.accent),
+              Padding(
+                padding: const EdgeInsets.only(left: 10),
+                child: Icon(AppIcons.check, size: 16, color: AppColors.accentOf(context)),
               ),
           ],
         ),

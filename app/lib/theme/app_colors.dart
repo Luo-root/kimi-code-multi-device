@@ -1,8 +1,13 @@
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
+import 'package:hux/hux.dart';
 
 /// SENTINEL 色彩令牌。85/5/10：中性主导，语义色仅决策点，装饰色点缀。
+///
+/// 中性色阶提供「浅色常量」（用于浅色主题与少数固定深色底色）与
+/// 「上下文感知方法 `XOf(BuildContext)`」（随主题在明/暗间翻转）。
+/// 语义色（绿/红/橙/灰）在明暗下保持一致，保留为常量。
 abstract final class AppColors {
-  // ---- 中性色阶（85%）----
+  // ---- 中性色阶（85%，浅色常量）----
   static const Color background = Color(0xFFF7F8FA);
   static const Color surface = Color(0xFFFFFFFF);
   static const Color keyCap = Color(0xFFE5E5EA);
@@ -10,17 +15,19 @@ abstract final class AppColors {
   static const Color textSecondary = Color(0xFF86868B);
   static const Color placeholder = Color(0xFFC0C0C0);
   static const Color hairline = Color(0xFFEEF0F2);
+  /// 暗色画布（scaffold / 大块底色）。
+  static const Color backgroundDark = Color(0xFF0E0E10);
 
-  // ---- 语义色（5%，克制，仅决策点）----
-  // accent 对齐 Kimi（月之暗面）官方标志性紫色主题（参考 kimi.com / kimi-code）。
-  static const Color accent = Color(0xFF6B5CE7); // Kimi 紫：选中/C位/链接
+  // ---- 语义色（5%，克制，仅决策点，明暗一致）----
+  // accent 采用 hux 设计语言（近中性黑/白主色，非 Kimi 紫），用于选中/C位/链接。
+  static const Color accent = Color(0xFF1D1D1F); // hux 中性主色：选中/C位/链接
   static const Color approve = Color(0xFF34C759); // 批准/在线/完成
   static const Color reject = Color(0xFFFF3B30); // 拒绝/关键命令/失败
   static const Color warning = Color(0xFFFF9500); // 降级/将睡/待批准
   static const Color think = Color(0xFF8E8E93); // 思考（中性，冷静）
 
   // ---- 语义色淡底（ARGB 直定义，避免废弃 API）----
-  static const Color accentSoft = Color(0x1A6B5CE7); // ~10% Kimi 紫淡底
+  static const Color accentSoft = Color(0x1A1D1D1F); // ~10% 中性主色淡底
   static const Color approveSoft = Color(0x1F34C759); // ~12%
   static const Color rejectSoft = Color(0x1AFF3B30); // ~10%
   static const Color warningSoft = Color(0x1FFF9500); // ~12%
@@ -35,4 +42,39 @@ abstract final class AppColors {
     Color(0xFFE8A0A0), // 暗红
     Color(0xFFF4C2C2), // 粉红
   ];
+
+  // ---- 上下文感知（暗色适配）：随主题在明/暗间翻转 ----
+  static bool _isDark(BuildContext c) =>
+      Theme.of(c).brightness == Brightness.dark;
+
+  /// 主文本色：浅色近黑 / 暗色近白。
+  static Color textPrimaryOf(BuildContext c) => HuxTokens.textPrimary(c);
+
+  /// 次级文本色。
+  static Color textSecondaryOf(BuildContext c) => HuxTokens.textSecondary(c);
+
+  /// 卡片/浮层表面色：浅色白 / 暗色近黑。
+  static Color surfaceOf(BuildContext c) => HuxTokens.surfacePrimary(c);
+
+  /// 画布（scaffold / 大块底色）。
+  static Color backgroundOf(BuildContext c) =>
+      _isDark(c) ? backgroundDark : background;
+
+  /// 按键/弱底色（如 + 按钮、未选中态）。
+  static Color keyCapOf(BuildContext c) =>
+      HuxTokens.buttonSecondaryBackground(c);
+
+  /// 占位/禁用文字。
+  static Color placeholderOf(BuildContext c) => HuxTokens.textDisabled(c);
+
+  /// 发丝分隔线。
+  static Color hairlineOf(BuildContext c) => HuxTokens.borderSecondary(c);
+
+  /// 选中/C位/链接主色：浅色近黑 / 暗色近白（与 hux primary 对齐）。
+  static Color accentOf(BuildContext c) => HuxTokens.primary(c);
+
+  /// 选中态淡底：浅色 ~10% 黑 / 暗色 ~12% 白。
+  static Color accentSoftOf(BuildContext c) => _isDark(c)
+      ? HuxColors.white.withValues(alpha: 0.12)
+      : const Color(0x1A1D1D1F);
 }

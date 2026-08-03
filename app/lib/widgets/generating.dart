@@ -44,8 +44,8 @@ class _BreathingDotsState extends State<BreathingDots>
                 child: Container(
                   width: 7,
                   height: 7,
-                  decoration: const BoxDecoration(
-                    color: AppColors.accent,
+                  decoration: BoxDecoration(
+                    color: AppColors.accentOf(context),
                     shape: BoxShape.circle,
                   ),
                 ),
@@ -84,7 +84,7 @@ class _BlinkingCursorState extends State<BlinkingCursor>
           height: (AppText.body.fontSize ?? 15) * 1.2,
           margin: const EdgeInsets.only(left: 2),
           decoration: BoxDecoration(
-            color: AppColors.accent,
+            color: AppColors.accentOf(context),
             borderRadius: BorderRadius.circular(1),
           ),
         ),

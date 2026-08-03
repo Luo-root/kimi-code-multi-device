@@ -49,6 +49,38 @@ class StreamBlock {
           output: output);
 }
 
+/// 将一整段会话汇总为纯文本，供「复制对话」按钮使用。
+/// 顺序拼接 user / think / text / tool（命令 + 输出），跳过空内容。
+String conversationText(List<StreamBlock> blocks) {
+  final buf = StringBuffer();
+  for (final b in blocks) {
+    switch (b.kind) {
+      case BlockKind.user:
+        if (b.text.trim().isNotEmpty) {
+          buf.writeln('用户：${b.text.trim()}');
+          buf.writeln();
+        }
+      case BlockKind.think:
+        if (b.text.trim().isNotEmpty) {
+          buf.writeln('（思考）${b.text.trim()}');
+          buf.writeln();
+        }
+      case BlockKind.text:
+        if (b.text.trim().isNotEmpty) {
+          buf.writeln(b.text.trim());
+          buf.writeln();
+        }
+      case BlockKind.tool:
+        final cmd = (b.command ?? '').trim();
+        final out = b.output.trim();
+        if (cmd.isNotEmpty) buf.writeln('工具命令：$cmd');
+        if (out.isNotEmpty) buf.writeln('工具输出：$out');
+        if (cmd.isNotEmpty || out.isNotEmpty) buf.writeln();
+    }
+  }
+  return buf.toString().trim();
+}
+
 /// 批准请求的一个选项。
 class PermOption {
   final String optionId;

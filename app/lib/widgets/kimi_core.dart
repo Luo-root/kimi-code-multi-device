@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 /// 双层八角菱形反向折叠旋转——外层顺时针、内层逆时针，
 /// 周期中点收束至 12% 后回弹，传达“AI 正在凝聚、思考中”。
 ///
-/// 周期 4.5s，缓动 cubic-bezier(.4,0,.2,1)，与 SVG 原作完全一致。
+/// 周期 3s，缓动 cubic-bezier(.4,0,.2,1)（比 SVG 原作的 4.5s 略快，动效更利落）。
 /// 纯 CustomPaint 矢量绘制，[size] 可为任意尺寸无损缩放。
 /// 默认 2.5px 微指示器：作为流式输出尾部的“呼吸光点”存在，不干扰阅读。
 class KimiCoreIndicator extends StatefulWidget {
@@ -35,7 +35,7 @@ class _KimiCoreIndicatorState extends State<KimiCoreIndicator>
     with SingleTickerProviderStateMixin {
   late final AnimationController _ctrl = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 4500),
+    duration: const Duration(milliseconds: 3000),
   );
 
   @override
@@ -124,13 +124,13 @@ class _KimiCorePainter extends CustomPainter {
 
   _KimiCorePainter({required this.t});
 
-  // ---- 色彩（对齐 SVG coreGrad：#C084FC → #A855F7 → #7C3AED）----
+  // ---- 色彩（浅天蓝系：#BAE6FD → #7DD3FC → #38BDF8，清爽不突兀）----
   static const _gradColors = [
-    Color(0xFFC084FC),
-    Color(0xFFA855F7),
-    Color(0xFF7C3AED),
+    Color(0xFFBAE6FD),
+    Color(0xFF7DD3FC),
+    Color(0xFF38BDF8),
   ];
-  static const _corePurple = Color(0xFF7C3AED);
+  static const _coreBlue = Color(0xFF38BDF8);
 
   /// 八角星中间顶点半径比（SVG: 22.63/36 ≈ 0.629）。
   static const _midRatio = 0.629;
@@ -208,7 +208,7 @@ class _KimiCorePainter extends CustomPainter {
       Paint()
         ..style = PaintingStyle.stroke
         ..strokeWidth = unit * 1
-        ..color = _corePurple.withValues(alpha: 0.3),
+        ..color = _coreBlue.withValues(alpha: 0.3),
     ); // 外描边
     _drawStar8(
       canvas,
@@ -216,18 +216,18 @@ class _KimiCorePainter extends CustomPainter {
       Paint()
         ..style = PaintingStyle.stroke
         ..strokeWidth = unit * 2
-        ..color = _corePurple.withValues(alpha: 0.6),
+        ..color = _coreBlue.withValues(alpha: 0.6),
     ); // 内描边
     final innerCross = Paint()
       ..strokeWidth = unit * 1.4
-      ..color = _corePurple.withValues(alpha: 0.4);
+      ..color = _coreBlue.withValues(alpha: 0.4);
     canvas.drawLine(Offset(-unit * 10.8, 0), Offset(unit * 10.8, 0), innerCross);
     canvas.drawLine(Offset(0, -unit * 10.8), Offset(0, unit * 10.8), innerCross);
     // 中心圆点
     canvas.drawCircle(
       Offset.zero,
       unit * 3,
-      Paint()..color = _corePurple.withValues(alpha: 0.8),
+      Paint()..color = _coreBlue.withValues(alpha: 0.8),
     );
     canvas.restore();
 

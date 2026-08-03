@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:hux/hux.dart';
 import '../relay/models.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
 import '../theme/app_dimens.dart';
-import '../theme/app_shadows.dart';
 import '../theme/app_icons.dart';
 import '../widgets/common.dart';
 import 'markdown.dart';
@@ -47,8 +47,6 @@ class _StreamBlockViewState extends State<StreamBlockView> {
       children: [
         Expanded(child: MarkdownView(data: widget.block.text)),
         if (streaming) const BlinkingCursor(),
-        // §UX-2.2：流式未完成时不渲染复制按钮（半截内容不可复制）。
-        if (!streaming) CopyButton(text: widget.block.text),
       ],
     );
   }
@@ -64,7 +62,7 @@ class _StreamBlockViewState extends State<StreamBlockView> {
             constraints: const BoxConstraints(maxWidth: 260),
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             decoration: BoxDecoration(
-              color: AppColors.accentSoft,
+              color: AppColors.accentSoftOf(context),
               borderRadius: BorderRadius.circular(16),
             ),
             child: Text(widget.block.text, style: AppText.body),
@@ -132,7 +130,7 @@ class _StreamBlockViewState extends State<StreamBlockView> {
     final color = switch (b.status) {
       ToolStatus.done => AppColors.approve,
       ToolStatus.failed => AppColors.reject,
-      ToolStatus.running => AppColors.accent,
+      ToolStatus.running => AppColors.accentOf(context),
       ToolStatus.pending => AppColors.warning,
     };
     final label = switch (b.status) {
@@ -141,12 +139,11 @@ class _StreamBlockViewState extends State<StreamBlockView> {
       ToolStatus.running => '执行中',
       ToolStatus.pending => '等待',
     };
-    return Container(
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(AppRadius.thumbnail),
-        boxShadow: AppShadows.card,
-      ),
+    return HuxCard(
+      margin: EdgeInsets.zero,
+      padding: EdgeInsets.zero,
+      borderRadius: AppRadius.thumbnail,
+      backgroundColor: AppColors.surfaceOf(context),
       child: IntrinsicHeight(
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -178,17 +175,17 @@ class _StreamBlockViewState extends State<StreamBlockView> {
                         child: Row(
                           children: [
                             Icon(AppIcons.terminal,
-                                size: 14, color: AppColors.textSecondary),
+                                size: 14, color: AppColors.textSecondaryOf(context)),
                             const SizedBox(width: 8),
                             Text(b.toolName ?? 'tool', style: AppText.mono),
                             const Spacer(),
                             if (b.status == ToolStatus.running)
-                              const SizedBox(
+                              SizedBox(
                                 width: 12,
                                 height: 12,
                                 child: CircularProgressIndicator(
                                     strokeWidth: 2,
-                                    color: AppColors.accent),
+                                    color: AppColors.accentOf(context)),
                               )
                             else
                               Icon(
@@ -207,7 +204,7 @@ class _StreamBlockViewState extends State<StreamBlockView> {
                                     ? AppIcons.chevronDown
                                     : AppIcons.chevronRight,
                                 size: 13,
-                                color: AppColors.placeholder),
+                                color: AppColors.placeholderOf(context)),
                           ],
                         ),
                       ),
@@ -223,7 +220,7 @@ class _StreamBlockViewState extends State<StreamBlockView> {
                               child: Container(
                                 width: double.infinity,
                                 decoration: BoxDecoration(
-                                  color: AppColors.textPrimary,
+                                  color: const Color(0xFF1D1D1F),
                                   borderRadius: BorderRadius.circular(8),
                                 ),
                                 child: SingleChildScrollView(
@@ -272,11 +269,11 @@ class _StreamBlockViewState extends State<StreamBlockView> {
                         padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
                         child: Row(
                           children: [
-                            const SizedBox(
+                            SizedBox(
                                 width: 12,
                                 height: 12,
                                 child: CircularProgressIndicator(
-                                    strokeWidth: 2, color: AppColors.accent)),
+                                    strokeWidth: 2, color: AppColors.accentOf(context))),
                             const SizedBox(width: 8),
                             Text('准备命令…', style: AppText.monoCaption),
                           ],
