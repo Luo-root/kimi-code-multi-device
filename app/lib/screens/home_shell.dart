@@ -304,7 +304,7 @@ class _HomeShellState extends State<HomeShell> {
               HuxButton(
                 onPressed: () => Navigator.of(context).pop(),
                 variant: HuxButtonVariant.secondary,
-                child: const Text('关闭'),
+                child: Text('关闭', style: AppText.calloutStrong),
               ),
             ],
           ),
@@ -724,7 +724,6 @@ class _ModeIconMenuState extends State<_ModeIconMenu> {
   /// 退场动画中尚未移除的 entry；重开时先强制移除，避免 GlobalKey 冲突。
   OverlayEntry? _exiting;
   final _popupKey = GlobalKey<PopupAnimatorState>();
-  bool _down = false;
   double _menuMaxH = 320;
   bool get _open => _entry != null;
 
@@ -842,28 +841,15 @@ class _ModeIconMenuState extends State<_ModeIconMenu> {
   Widget build(BuildContext context) {
     final cur = _cfgCur(widget.cfg, 'mode');
     final icon = _modeIcon[cur] ?? AppIcons.modeManual;
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTapDown: (_) => setState(() => _down = true),
-      onTapUp: (_) => setState(() => _down = false),
-      onTapCancel: () => setState(() => _down = false),
-      onTap: _toggle,
-      // §UX-10.2-1：视觉 32px，命中区域 44×44。
-      child: SizedBox(
-        width: 44,
-        height: 44,
-        child: Center(
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 120),
-            width: 32,
-            height: 32,
-            decoration: BoxDecoration(
-              color: _down ? const Color(0xFFDADAE0) : AppColors.keyCapOf(context),
-              shape: BoxShape.circle,
-            ),
-            child: Icon(icon, size: 16, color: AppColors.textPrimaryOf(context)),
-          ),
-        ),
+    return Semantics(
+      label: '切换模式',
+      button: true,
+      child: HuxButton(
+        onPressed: _toggle,
+        variant: HuxButtonVariant.secondary,
+        size: HuxButtonSize.small,
+        icon: icon,
+        child: const SizedBox(width: 0),
       ),
     );
   }
@@ -911,9 +897,8 @@ class _MenuRowState extends State<_MenuRow> {
             ],
             Expanded(
               child: Text(widget.label,
-                  style: AppText.callout.copyWith(
+                  style: AppText.calloutStrong.copyWith(
                     color: AppColors.textPrimaryOf(context),
-                    fontWeight: FontWeight.w600,
                   )),
             ),
             if (widget.selected)
@@ -958,7 +943,6 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
   /// 退场动画中尚未移除的 entry；重开时先强制移除，避免 GlobalKey 冲突。
   OverlayEntry? _exiting;
   final _popupKey = GlobalKey<PopupAnimatorState>();
-  bool _down = false;
   double _menuMaxH = 300;
   /// 面板切换方向：true = 下钻（新层从右入），false = 返回（§UX-1.2 层级过渡）。
   bool _navForward = true;
@@ -1181,7 +1165,7 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
                 title,
                 key: ValueKey(title),
                 textAlign: TextAlign.center,
-                style: AppText.callout.copyWith(fontWeight: FontWeight.w600),
+                style: AppText.calloutStrong,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -1253,37 +1237,44 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Pressable(
-          onTap: onToggle,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-            child: Row(
-              children: [
-                Text(title,
-                    style: AppText.callout.copyWith(
-                      color: AppColors.textPrimaryOf(context),
-                      fontWeight: FontWeight.w600,
-                    )),
-                if (value.isNotEmpty) ...[
-                  const SizedBox(width: 10),
-                  Flexible(
-                    child: Text(value,
-                        textAlign: TextAlign.left,
-                        style: AppText.caption
-                            .copyWith(color: AppColors.textSecondaryOf(context)),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis),
+        SizedBox(
+          width: double.infinity,
+          child: Pressable(
+            onTap: onToggle,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Row(
+                      children: [
+                        Text(title,
+                            style: AppText.calloutStrong.copyWith(
+                              color: AppColors.textPrimaryOf(context),
+                            )),
+                        if (value.isNotEmpty) ...[
+                          const SizedBox(width: 10),
+                          Flexible(
+                            child: Text(value,
+                                textAlign: TextAlign.left,
+                                style: AppText.caption.copyWith(
+                                    color: AppColors.textSecondaryOf(context)),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis),
+                          ),
+                        ],
+                      ],
+                    ),
                   ),
-                  const Spacer(),
-                ] else
-                  const Spacer(),
-                AnimatedRotation(
-                  turns: expanded ? 0.5 : 0,
-                  duration: const Duration(milliseconds: 200),
-                  child: Icon(AppIcons.chevronDown,
-                      size: 14, color: AppColors.placeholderOf(context)),
-                ),
-              ],
+                  const SizedBox(width: 8),
+                  AnimatedRotation(
+                    turns: expanded ? 0.5 : 0,
+                    duration: const Duration(milliseconds: 200),
+                    child: Icon(AppIcons.chevronDown,
+                        size: 14, color: AppColors.placeholderOf(context)),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -1313,9 +1304,8 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
           children: [
             Expanded(
               child: Text(label,
-                  style: AppText.callout.copyWith(
+                  style: (selected ? AppText.calloutStrong : AppText.callout).copyWith(
                     color: AppColors.textPrimaryOf(context),
-                    fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
                   ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis),
@@ -1330,36 +1320,28 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTapDown: (_) => setState(() => _down = true),
-      onTapUp: (_) => setState(() => _down = false),
-      onTapCancel: () => setState(() => _down = false),
-      onTap: _toggle,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 120),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-        decoration: BoxDecoration(
-          color: _down ? const Color(0xFFDADAE0) : AppColors.keyCapOf(context),
-          borderRadius: BorderRadius.circular(AppRadius.pill),
-        ),
+    return HuxButton(
+      onPressed: _toggle,
+      variant: HuxButtonVariant.secondary,
+      size: HuxButtonSize.small,
+      icon: AppIcons.modelChip,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 128),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(AppIcons.modelChip,
-                size: 13, color: AppColors.textSecondaryOf(context)),
-            const SizedBox(width: 6),
             Flexible(
               child: Text(
                 _curModelLabel,
-                style: AppText.callout.copyWith(color: AppColors.textPrimaryOf(context)),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
             ),
             const SizedBox(width: 4),
-            Icon(_open ? AppIcons.chevronUp : AppIcons.chevronDown,
-                size: 12, color: AppColors.textSecondaryOf(context)),
+            Icon(
+              _open ? AppIcons.chevronUp : AppIcons.chevronDown,
+              size: 12,
+            ),
           ],
         ),
       ),
@@ -1440,38 +1422,16 @@ class _SessionDrawerState extends State<_SessionDrawer> {
               size: HuxButtonSize.medium,
               width: HuxButtonWidth.expand,
               icon: AppIcons.plus,
-              child: const Text('新建会话'),
+              child: Text('新建会话', style: AppText.calloutStrong),
             ),
           ),
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-            child: Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-              decoration: BoxDecoration(
-                color: AppColors.surfaceOf(context),
-                borderRadius: BorderRadius.circular(AppRadius.pill),
-                boxShadow: AppShadows.input,
-              ),
-              child: Row(
-                children: [
-                  Icon(AppIcons.search,
-                      size: 15, color: AppColors.textSecondaryOf(context)),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: TextField(
-                      style: AppText.callout,
-                      onChanged: (v) => setState(() => _q = v),
-                      decoration: const InputDecoration(
-                        isCollapsed: true,
-                        border: InputBorder.none,
-                        hintText: '搜索会话',
-                        hintStyle: AppText.placeholder,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
+            child: HuxInput(
+              hint: '搜索会话',
+              prefixIcon: const Icon(AppIcons.search),
+              textInputAction: TextInputAction.search,
+              onChanged: (v) => setState(() => _q = v),
             ),
           ),
           const Padding(
@@ -1556,7 +1516,7 @@ class _SessionDrawerState extends State<_SessionDrawer> {
             const SizedBox(width: 8),
             Expanded(
               child: Text(key,
-                  style: AppText.callout.copyWith(fontWeight: FontWeight.w600),
+                  style: AppText.calloutStrong,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis),
             ),
@@ -1594,9 +1554,8 @@ class _SessionDrawerState extends State<_SessionDrawer> {
                   padding: const EdgeInsets.fromLTRB(12, 9, 12, 9),
                   child: Text(
                     m.title.isEmpty ? '（无标题）' : m.title,
-                    style: AppText.callout.copyWith(
+                    style: (sel ? AppText.calloutStrong : AppText.callout).copyWith(
                       color: AppColors.textPrimaryOf(context),
-                      fontWeight: sel ? FontWeight.w600 : FontWeight.w400,
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
@@ -1955,13 +1914,13 @@ class _InputBar extends StatelessWidget {
   });
   @override
   Widget build(BuildContext context) {
-    return Container(
+    // HuxInput 固定 40px、HuxTextarea 暂未暴露自动纠错等代码输入参数。
+    // composer 使用 HuxCard 承载 Hux 表面/边框，内部保留多行代码输入行为。
+    return HuxCard(
+      size: HuxCardSize.large,
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(
-        color: AppColors.surfaceOf(context),
-        borderRadius: BorderRadius.circular(AppRadius.card),
-        boxShadow: AppShadows.input,
-      ),
+      borderRadius: AppRadius.card,
+      backgroundColor: AppColors.surfaceOf(context),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
@@ -2296,7 +2255,7 @@ class _PermSheetState extends State<_PermSheet>
       width: HuxButtonWidth.expand,
       isDisabled: disabled,
       child: Text(label,
-          style: AppText.callout.copyWith(fontWeight: FontWeight.w600)),
+          style: AppText.calloutStrong),
     );
   }
 }
@@ -2365,15 +2324,10 @@ class _SettingsSheetState extends State<_SettingsSheet> {
       'permTimeoutSeconds': int.tryParse(_timeoutCtrl.text.trim()) ?? 300,
       'autoPassNonCritical': _autoPass,
     });
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('配置已保存并应用',
-            style: AppText.callout.copyWith(color: AppColors.surfaceOf(context))),
-        backgroundColor: AppColors.textPrimaryOf(context),
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        duration: const Duration(milliseconds: 1600),
-      ),
+    context.showHuxSnackbar(
+      message: '配置已保存并应用',
+      variant: HuxSnackbarVariant.success,
+      duration: const Duration(milliseconds: 1600),
     );
   }
 
@@ -2417,14 +2371,12 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                     size: 18, color: AppColors.textPrimaryOf(context)),
                 const SizedBox(width: 8),
                 const Expanded(child: Text('设置', style: AppText.title1)),
-                Pressable(
-                  onTap: () => Navigator.of(context).pop(),
-                  child: SizedBox(
-                    width: 32,
-                    height: 32,
-                    child: Icon(AppIcons.close,
-                        size: 18, color: AppColors.textSecondaryOf(context)),
-                  ),
+                HuxButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  variant: HuxButtonVariant.ghost,
+                  size: HuxButtonSize.small,
+                  icon: AppIcons.close,
+                  child: const SizedBox(width: 0),
                 ),
               ],
             ),
@@ -2440,40 +2392,22 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                 _ro('思考强度', '${widget.effortLabel}（会话级待接通）'),
                 const SizedBox(height: 22),
                 _group('连接'),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 12, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: AppColors.backgroundOf(context),
-                    borderRadius: BorderRadius.circular(AppRadius.thumbnail),
-                  ),
-                  child: TextField(
-                    controller: _urlCtrl,
-                    style: AppText.monoCaption,
-                    decoration: const InputDecoration(
-                      isCollapsed: true,
-                      border: InputBorder.none,
-                      contentPadding: EdgeInsets.symmetric(vertical: 10),
-                    ),
-                  ),
+                HuxInput(
+                  controller: _urlCtrl,
+                  keyboardType: TextInputType.url,
+                  textInputAction: TextInputAction.done,
+                  onSubmitted: (_) => widget.onReconnect(_urlCtrl.text.trim()),
                 ),
                 const SizedBox(height: 8),
                 Align(
                   alignment: Alignment.centerLeft,
-                  child: Pressable(
-                    onTap: () => widget.onReconnect(_urlCtrl.text.trim()),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 9),
-                      decoration: BoxDecoration(
-                        color: AppColors.textPrimaryOf(context),
-                        borderRadius: BorderRadius.circular(AppRadius.pill),
-                      ),
-                      child: Text('保存并重连',
-                          style: AppText.callout.copyWith(
-                              color: AppColors.surfaceOf(context),
-                              fontWeight: FontWeight.w600)),
-                    ),
+                  child: HuxButton(
+                    onPressed: () => widget.onReconnect(_urlCtrl.text.trim()),
+                    variant: HuxButtonVariant.primary,
+                    primaryColor: AppColors.textPrimaryOf(context),
+                    textColor: AppColors.surfaceOf(context),
+                    size: HuxButtonSize.medium,
+                    child: Text('保存并重连', style: AppText.calloutStrong),
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -2484,25 +2418,12 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                 const SizedBox(height: 22),
                 _group('锁屏门铃'),
                 _ro('Bark 推送', '留空则关闭门铃'),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: AppColors.backgroundOf(context),
-                    borderRadius: BorderRadius.circular(AppRadius.thumbnail),
-                  ),
-                  child: TextField(
-                    controller: _barkUrlCtrl,
-                    style: AppText.monoCaption,
-                    onChanged: (_) => setState(() => _userEdited = true),
-                    decoration: const InputDecoration(
-                      isCollapsed: true,
-                      border: InputBorder.none,
-                      hintText: 'https://api.day.app/{key}',
-                      hintStyle: AppText.placeholder,
-                      contentPadding: EdgeInsets.symmetric(vertical: 10),
-                    ),
-                  ),
+                HuxInput(
+                  controller: _barkUrlCtrl,
+                  hint: 'https://api.day.app/{key}',
+                  keyboardType: TextInputType.url,
+                  textInputAction: TextInputAction.done,
+                  onChanged: (_) => setState(() => _userEdited = true),
                 ),
                 const SizedBox(height: 22),
                 _group('许可策略'),
@@ -2513,44 +2434,24 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                   });
                 }),
                 _ro('超时时长', 'manual 模式到期未决的代答阈值'),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: AppColors.backgroundOf(context),
-                    borderRadius: BorderRadius.circular(AppRadius.thumbnail),
-                  ),
-                  child: TextField(
-                    controller: _timeoutCtrl,
-                    style: AppText.monoCaption,
-                    keyboardType: TextInputType.number,
-                    onChanged: (_) => setState(() => _userEdited = true),
-                    decoration: const InputDecoration(
-                      isCollapsed: true,
-                      border: InputBorder.none,
-                      hintText: '秒，如 300',
-                      hintStyle: AppText.placeholder,
-                      contentPadding: EdgeInsets.symmetric(vertical: 10),
-                    ),
-                  ),
+                HuxInput(
+                  controller: _timeoutCtrl,
+                  hint: '秒，如 300',
+                  keyboardType: TextInputType.number,
+                  textInputAction: TextInputAction.done,
+                  onChanged: (_) => setState(() => _userEdited = true),
+                  onSubmitted: (_) => _save(),
                 ),
                 const SizedBox(height: 14),
                 Align(
                   alignment: Alignment.centerLeft,
-                  child: Pressable(
-                    onTap: _save,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 9),
-                      decoration: BoxDecoration(
-                        color: AppColors.textPrimaryOf(context),
-                        borderRadius: BorderRadius.circular(AppRadius.pill),
-                      ),
-                      child: Text('保存并应用',
-                          style: AppText.callout.copyWith(
-                              color: AppColors.surfaceOf(context),
-                              fontWeight: FontWeight.w600)),
-                    ),
+                  child: HuxButton(
+                    onPressed: _save,
+                    variant: HuxButtonVariant.primary,
+                    primaryColor: AppColors.textPrimaryOf(context),
+                    textColor: AppColors.surfaceOf(context),
+                    size: HuxButtonSize.medium,
+                    child: Text('保存并应用', style: AppText.calloutStrong),
                   ),
                 ),
                 const SizedBox(height: 14),
@@ -2601,10 +2502,10 @@ class _SettingsSheetState extends State<_SettingsSheet> {
         child: Row(
           children: [
             Expanded(child: Text(k, style: AppText.callout)),
-            Switch(
+            HuxSwitch(
               value: v,
-              activeThumbColor: AppColors.accentOf(context),
               onChanged: onChanged,
+              size: HuxSwitchSize.medium,
             ),
           ],
         ),
@@ -2670,14 +2571,11 @@ class _ConnBanner extends StatelessWidget {
       _ => (AppColors.textSecondaryOf(context), AppIcons.history, ''),
     };
 
-    return Container(
+    return HuxCard(
       margin: const EdgeInsets.fromLTRB(AppSpacing.pageMargin, 0, AppSpacing.pageMargin, 6),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: AppColors.surfaceOf(context),
-        borderRadius: BorderRadius.circular(AppRadius.thumbnail),
-        boxShadow: AppShadows.input,
-      ),
+      borderRadius: AppRadius.thumbnail,
+      backgroundColor: AppColors.surfaceOf(context),
       child: Row(
         children: [
           if (state == 'connecting' || (state == 'offline' && never))
@@ -2697,20 +2595,13 @@ class _ConnBanner extends StatelessWidget {
                 overflow: TextOverflow.ellipsis),
           ),
           if (state == 'degraded')
-            Pressable(
-              onTap: onRetry,
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-                decoration: BoxDecoration(
-                  color: AppColors.warning,
-                  borderRadius: BorderRadius.circular(AppRadius.pill),
-                ),
-                child: Text('重试',
-                    style: AppText.callout.copyWith(
-                        color: AppColors.surfaceOf(context),
-                        fontWeight: FontWeight.w600)),
-              ),
+            HuxButton(
+              onPressed: onRetry,
+              variant: HuxButtonVariant.primary,
+              primaryColor: AppColors.warning,
+              textColor: AppColors.surfaceOf(context),
+              size: HuxButtonSize.small,
+              child: Text('重试', style: AppText.calloutStrong),
             ),
         ],
       ),
@@ -2831,9 +2722,8 @@ class _SessionTab extends StatelessWidget {
               constraints: const BoxConstraints(maxWidth: 110),
               child: Text(
                 title,
-                style: AppText.callout.copyWith(
+                style: (selected ? AppText.calloutStrong : AppText.callout).copyWith(
                   color: AppColors.textPrimaryOf(context),
-                  fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
                 ),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
@@ -2880,8 +2770,7 @@ class _PendingBadge extends StatelessWidget {
             Icon(AppIcons.bell, size: 14, color: AppColors.surfaceOf(context)),
             const SizedBox(width: 6),
             Text('$count',
-                style: AppText.callout.copyWith(
-                    color: AppColors.surfaceOf(context), fontWeight: FontWeight.w700)),
+                style: AppText.badge.copyWith(color: AppColors.surfaceOf(context))),
           ],
         ),
       ),
@@ -2981,8 +2870,7 @@ class _PendingQueuePageState extends State<_PendingQueuePage> {
                                 const SizedBox(width: 6),
                                 Expanded(
                                   child: Text(widget.store.titleOf(g.key),
-                                      style: AppText.callout.copyWith(
-                                          fontWeight: FontWeight.w600),
+                                      style: AppText.calloutStrong,
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis),
                                 ),

@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:hux/hux.dart';
 import '../relay/models.dart';
 import '../relay/relay_client.dart';
 import '../relay/session_store.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
 import '../theme/app_dimens.dart';
-import '../theme/app_shadows.dart';
 import '../theme/app_icons.dart';
 import '../widgets/stream_block.dart';
 
@@ -163,39 +163,23 @@ class _RelayTestPageState extends State<RelayTestPage> {
           Row(
             children: [
               Expanded(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 12, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: AppColors.surfaceOf(context),
-                    borderRadius: BorderRadius.circular(AppRadius.pill),
-                    boxShadow: AppShadows.input,
-                  ),
-                  child: TextField(
-                    controller: _urlCtrl,
-                    style: AppText.monoCaption,
-                    decoration: const InputDecoration(
-                      isCollapsed: true,
-                      border: InputBorder.none,
-                    ),
-                  ),
+                child: HuxInput(
+                  controller: _urlCtrl,
+                  keyboardType: TextInputType.url,
+                  textInputAction: TextInputAction.done,
+                  onSubmitted: (_) => _connect(),
                 ),
               ),
               const SizedBox(width: 8),
-              GestureDetector(
-                onTap: _connect,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 16, vertical: 9),
-                  decoration: BoxDecoration(
-                    color: AppColors.textPrimaryOf(context),
-                    borderRadius: BorderRadius.circular(AppRadius.pill),
-                  ),
-                  child: Text('连接',
-                      style: AppText.callout.copyWith(
-                          color: AppColors.surfaceOf(context),
-                          fontWeight: FontWeight.w600)),
-                ),
+              HuxButton(
+                onPressed: _connect,
+                variant: HuxButtonVariant.primary,
+                primaryColor: AppColors.textPrimaryOf(context),
+                textColor: AppColors.surfaceOf(context),
+                size: HuxButtonSize.medium,
+                isLoading: _conn == _Conn.connecting,
+                isDisabled: _conn == _Conn.connecting,
+                child: Text('连接', style: AppText.calloutStrong),
               ),
             ],
           ),
@@ -214,15 +198,13 @@ class _RelayTestPageState extends State<RelayTestPage> {
   }
 
   Widget _permSheet(PermissionRequest p) {
-    return Container(
+    return HuxCard(
       margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
       padding: const EdgeInsets.all(AppSpacing.lg),
-      decoration: BoxDecoration(
-        color: AppColors.surfaceOf(context),
-        borderRadius: BorderRadius.circular(AppRadius.card),
-        boxShadow: AppShadows.card,
-        border: Border.all(color: AppColors.warning, width: 1),
-      ),
+      size: HuxCardSize.large,
+      borderRadius: AppRadius.card,
+      backgroundColor: AppColors.surfaceOf(context),
+      borderColor: AppColors.warning,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -271,24 +253,40 @@ class _RelayTestPageState extends State<RelayTestPage> {
   }
 
   Widget _permButton(PermOption opt) {
-    final (bg, fg, label) = switch (opt.kind) {
-      'allow_once' => (AppColors.approve, AppColors.surfaceOf(context), '批准'),
-      'allow_always' => (AppColors.keyCapOf(context), AppColors.textPrimaryOf(context), '本会话'),
-      'reject_once' => (AppColors.rejectSoft, AppColors.reject, '拒绝'),
-      _ => (AppColors.keyCapOf(context), AppColors.textPrimaryOf(context), opt.name ?? opt.optionId),
-    };
-    return GestureDetector(
-      onTap: () => _decide(opt),
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 10),
-        decoration: BoxDecoration(
-          color: bg,
-          borderRadius: BorderRadius.circular(AppRadius.pill),
+    final (variant, bg, fg, label) = switch (opt.kind) {
+      'allow_once' => (
+          HuxButtonVariant.primary,
+          AppColors.approve,
+          AppColors.surfaceOf(context),
+          '批准'
         ),
-        alignment: Alignment.center,
-        child: Text(label,
-            style: AppText.callout.copyWith(color: fg, fontWeight: FontWeight.w600)),
-      ),
+      'allow_always' => (
+          HuxButtonVariant.secondary,
+          AppColors.keyCapOf(context),
+          AppColors.textPrimaryOf(context),
+          '本会话'
+        ),
+      'reject_once' => (
+          HuxButtonVariant.primary,
+          AppColors.rejectSoft,
+          AppColors.reject,
+          '拒绝'
+        ),
+      _ => (
+          HuxButtonVariant.secondary,
+          AppColors.keyCapOf(context),
+          AppColors.textPrimaryOf(context),
+          opt.name ?? opt.optionId
+        ),
+    };
+    return HuxButton(
+      onPressed: () => _decide(opt),
+      variant: variant,
+      primaryColor: bg,
+      textColor: fg,
+      size: HuxButtonSize.medium,
+      width: HuxButtonWidth.expand,
+      child: Text(label, style: AppText.calloutStrong),
     );
   }
 
@@ -297,46 +295,32 @@ class _RelayTestPageState extends State<RelayTestPage> {
     return Container(
       padding: EdgeInsets.fromLTRB(
           16, 8, 16, 12 + MediaQuery.of(context).padding.bottom),
-      child: Container(
+      child: HuxCard(
+        size: HuxCardSize.large,
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-        decoration: BoxDecoration(
-          color: AppColors.surfaceOf(context),
-          borderRadius: BorderRadius.circular(AppRadius.card),
-          boxShadow: AppShadows.input,
-        ),
+        borderRadius: AppRadius.card,
+        backgroundColor: AppColors.surfaceOf(context),
         child: Row(
           children: [
             Expanded(
-              child: TextField(
+              child: HuxInput(
                 controller: _inputCtrl,
                 enabled: enabled,
-                style: AppText.body,
+                hint: enabled ? '尽管问…' : '先连接中继',
+                textInputAction: TextInputAction.send,
                 onSubmitted: (_) => _send(),
-                decoration: InputDecoration(
-                  isCollapsed: true,
-                  border: InputBorder.none,
-                  hintText: enabled ? '尽管问…' : '先连接中继',
-                  hintStyle: AppText.placeholder,
-                  contentPadding: const EdgeInsets.symmetric(vertical: 8),
-                ),
               ),
             ),
             const SizedBox(width: AppSpacing.sm),
-            GestureDetector(
-              onTap: enabled ? _send : null,
-              child: Container(
-                width: 32,
-                height: 32,
-                decoration: BoxDecoration(
-                  color: enabled
-                      ? AppColors.textPrimaryOf(context)
-                      : AppColors.keyCapOf(context),
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(AppIcons.send,
-                    size: 16,
-                    color: enabled ? AppColors.surfaceOf(context) : AppColors.placeholderOf(context)),
-              ),
+            HuxButton(
+              onPressed: enabled ? _send : null,
+              variant: HuxButtonVariant.primary,
+              primaryColor: AppColors.textPrimaryOf(context),
+              textColor: AppColors.surfaceOf(context),
+              size: HuxButtonSize.small,
+              isDisabled: !enabled,
+              icon: AppIcons.send,
+              child: const SizedBox(width: 0),
             ),
           ],
         ),
