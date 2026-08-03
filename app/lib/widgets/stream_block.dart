@@ -47,8 +47,6 @@ class _StreamBlockViewState extends State<StreamBlockView> {
       children: [
         Expanded(child: MarkdownView(data: widget.block.text)),
         if (streaming) const BlinkingCursor(),
-        // §UX-2.2：流式未完成时不渲染复制按钮（半截内容不可复制）。
-        if (!streaming) CopyButton(text: widget.block.text),
       ],
     );
   }

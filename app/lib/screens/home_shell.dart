@@ -445,6 +445,17 @@ class _HomeShellState extends State<HomeShell> {
     // 一旦 AI 块出现，标识改在轮起点渲染（见 itemBuilder）。
     final needTailIdentity =
         running && (blocks.isEmpty || blocks.last.kind == BlockKind.user);
+    // §UX-2.2：每条消息一个复制入口——user 块复制原文；AI 回复的末块复制整条回复。
+    // 流式进行中不挂 AI 回复复制（避免复制半截内容）。
+    final copyKinds = List<_MsgCopy>.filled(blocks.length, _MsgCopy.none);
+    for (var i = 0; i < blocks.length; i++) {
+      if (blocks[i].kind == BlockKind.user) {
+        copyKinds[i] = _MsgCopy.user;
+      } else if (!running &&
+          (i == blocks.length - 1 || blocks[i + 1].kind == BlockKind.user)) {
+        copyKinds[i] = _MsgCopy.reply;
+      }
+    }
 
     // 有弹层打开时拦截返回手势：先关最上层弹层，而非直接退出页面（§UX-1.5）。
     return AnimatedBuilder(
@@ -522,24 +533,44 @@ class _HomeShellState extends State<HomeShell> {
                               // 当前正在输出的轮动态转动，历史轮静止。
                               final curTurn =
                                   running ? _currentTurnStart(blocks) : null;
+                              final children = <Widget>[
+                                if (_atTurnStart(blocks, i))
+                                  _AiIdentityBar(streaming: i == curTurn),
+                                Padding(
+                                  padding: EdgeInsets.only(
+                                      bottom: i == blocks.length - 1
+                                          ? 0
+                                          : (copyKinds[i] != _MsgCopy.none
+                                              ? 2.0
+                                              : AppSpacing.lg)),
+                                  child: StreamBlockView(
+                                    block: blocks[i],
+                                    streaming: running &&
+                                        i == blocks.length - 1,
+                                  ),
+                                ),
+                              ];
+                              // §UX-2.2：按消息维度复制——用户消息复制原文；
+                              // AI 回复在回复末块处复制整条回复（流式不显示）。
+                              final cpy = copyKinds[i];
+                              if (cpy != _MsgCopy.none) {
+                                final text = cpy == _MsgCopy.user
+                                    ? blocks[i].text
+                                    : conversationText(blocks.sublist(
+                                        _aiRunStart(blocks, i), i + 1));
+                                children.add(const SizedBox(height: 0));
+                                children.add(Row(
+                                  mainAxisAlignment: cpy == _MsgCopy.user
+                                      ? MainAxisAlignment.end
+                                      : MainAxisAlignment.start,
+                                  children: [
+                                    CopyButton(text: text, plain: true)
+                                  ],
+                                ));
+                              }
                               return Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  if (_atTurnStart(blocks, i))
-                                    _AiIdentityBar(
-                                        streaming: i == curTurn),
-                                  Padding(
-                                    padding: EdgeInsets.only(
-                                        bottom: i == blocks.length - 1
-                                            ? 0
-                                            : AppSpacing.lg),
-                                    child: StreamBlockView(
-                                      block: blocks[i],
-                                      streaming: running &&
-                                          i == blocks.length - 1,
-                                    ),
-                                  ),
-                                ],
+                                children: children,
                               );
                             }
                             // 发送后等待首 token：AI 块还没出现，标识在 user 下方、
@@ -1754,6 +1785,20 @@ class _ScrollBottomFab extends StatelessWidget {
       ),
     );
   }
+}
+
+// ---------- 每条消息（用户 / AI 回复）的复制按钮（§UX-2.2：按消息维度，非整段会话）----------
+
+/// 一条消息的复制动作类型：无 / 复制用户原文 / 复制整条 AI 回复。
+enum _MsgCopy { none, user, reply }
+
+/// 返回某条 AI 块所属回复的起点（向前找到上一个 user 块之后）。
+int _aiRunStart(List<StreamBlock> blocks, int i) {
+  var s = i;
+  while (s - 1 >= 0 && blocks[s - 1].kind != BlockKind.user) {
+    s--;
+  }
+  return s;
 }
 
 // ---------- 底部 dock ----------

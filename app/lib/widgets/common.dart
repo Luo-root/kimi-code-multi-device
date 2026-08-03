@@ -31,7 +31,9 @@ void copyToClipboard(ScaffoldMessengerState messenger, String text) {
 class CopyButton extends StatefulWidget {
   final String text;
   final bool dark;
-  const CopyButton({super.key, required this.text, this.dark = false});
+  final bool plain;
+  const CopyButton(
+      {super.key, required this.text, this.dark = false, this.plain = false});
 
   @override
   State<CopyButton> createState() => _CopyButtonState();
@@ -60,9 +62,11 @@ class _CopyButtonState extends State<CopyButton> {
 
   @override
   Widget build(BuildContext context) {
-    final bg = widget.dark
-        ? const Color(0x33FFFFFF)
-        : (_done ? AppColors.approveSoft : AppColors.keyCap);
+    final bg = widget.plain
+        ? Colors.transparent
+        : (widget.dark
+            ? const Color(0x33FFFFFF)
+            : (_done ? AppColors.approveSoft : AppColors.keyCap));
     final fg = widget.dark
         ? (_done ? AppColors.approve : const Color(0xFFC7C7CC))
         : (_done ? AppColors.approve : AppColors.textSecondary);
