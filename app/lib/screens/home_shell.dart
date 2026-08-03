@@ -747,7 +747,7 @@ class _ModeIconMenuState extends State<_ModeIconMenu> {
         top: above ? null : topY,
         bottom: above ? (vh - off.dy + 6) : null,
         right: 8,
-        width: 220,
+        width: 168,
         child: Container(
           clipBehavior: Clip.antiAlias,
           decoration: BoxDecoration(
@@ -911,10 +911,10 @@ class _MenuRowState extends State<_MenuRow> {
   }
 }
 
-// ---------- 级联配置菜单：provider → model → 思考深度（§09 级联结构）----------
+// ---------- 级联配置菜单：home → provider / model / thinking（§09 级联结构）----------
 
-/// 一个主触发器，下钻三级子菜单。选中 model 即下发 set_model（乐观更新），
-/// 思考深度为占位（会话级 ACP 切法待确认，不下发）。触发器用短标签，菜单看全称。
+/// 顶栏单一触发器，弹出后先显示 provider / model / thinking 三个入口，
+/// 点击入口进入对应选择列表。选中即下发并关闭（§UX-1.2 层级过渡）。
 class _CascadeConfigMenu extends StatefulWidget {
   final dynamic cfg;
   final String effortId;
@@ -943,12 +943,18 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
   final _popupKey = GlobalKey<PopupAnimatorState>();
   bool _down = false;
   double _menuMaxH = 300;
-  /// 级联导航方向：true = 下钻（新层从右入），false = 返回（§UX-1.2 层级过渡）。
+  /// 面板切换方向：true = 下钻（新层从右入），false = 返回（§UX-1.2 层级过渡）。
   bool _navForward = true;
+  /// 当前面板：home / provider / model / effort。
+  String _panel = 'home';
+  bool _expandProvider = false;
+  bool _expandModel = false;
+  bool _expandThinking = false;
   bool get _open => _entry != null;
 
   List<Map<String, dynamic>> get _models => _cfgList(widget.cfg, 'model');
   String get _curModel => _cfgCur(widget.cfg, 'model');
+  String get _curProvider => _provOf(_curModel);
 
   List<String> get _providers {
     final seen = <String>[];
@@ -971,13 +977,22 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
     return cur.isEmpty ? '选择模型' : cur;
   }
 
+  String get _curEffortLabel {
+    return widget.effortLabel[widget.effortId] ??
+        widget.effortOpts
+            .firstWhere((e) => e.id == widget.effortId,
+                orElse: () => widget.effortOpts.first)
+            .label;
+  }
+
   void _toggle() => _open ? _close() : _openMenu();
 
   void _openMenu() {
     _killExiting();
-    final cur = _curModel;
-    var level = 0;
-    var selProv = _provOf(cur);
+    _panel = 'home';
+    _expandProvider = false;
+    _expandModel = false;
+    _expandThinking = false;
     _navForward = true;
     final box = context.findRenderObject() as RenderBox;
     final off = box.localToGlobal(Offset.zero);
@@ -990,7 +1005,7 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
     final availAbove = off.dy - 6;
     final above = availBelow < 340 && availAbove > availBelow;
     _menuMaxH = (above ? availAbove : availBelow).clamp(160.0, 360.0);
-    const width = 250.0;
+    const width = 216.0;
     final left = (AppSpacing.pageMargin + width > screenW - 8)
         ? screenW - 8 - width
         : AppSpacing.pageMargin;
@@ -1015,12 +1030,7 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                _header(level, selProv, setOverlay, () {
-                  _navForward = false;
-                  setOverlay(() {
-                    if (level > 0) level--;
-                  });
-                }),
+                _header(setOverlay),
                 ConstrainedBox(
                   constraints: BoxConstraints(maxHeight: _menuMaxH),
                   child: SingleChildScrollView(
@@ -1042,7 +1052,7 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
                         ),
                         transitionBuilder: (child, anim) {
                           // 下钻：新层右侧入、旧层左侧出；返回时相反。
-                          final incoming = child.key == ValueKey(level);
+                          final incoming = child.key == ValueKey(_panel);
                           final begin = (_navForward == incoming)
                               ? const Offset(0.12, 0)
                               : const Offset(-0.12, 0);
@@ -1053,20 +1063,8 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
                           );
                         },
                         child: KeyedSubtree(
-                          key: ValueKey(level),
-                          child: _levelList(level, selProv, (prov) {
-                            _navForward = true;
-                            setOverlay(() {
-                              selProv = prov;
-                              level = 1;
-                            });
-                          }, (modelVal) {
-                            widget.onModel(modelVal);
-                            _close();
-                          }, (effId) {
-                            widget.onEffort(effId);
-                            _close();
-                          }, setOverlay),
+                          key: ValueKey(_panel),
+                          child: _panelList(setOverlay),
                         ),
                       ),
                     ),
@@ -1081,6 +1079,14 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
     Overlay.of(context).insert(_entry!);
     PopupRegistry.instance.register(_close);
     setState(() {});
+  }
+
+
+  void _back(StateSetter setOverlay) {
+    _navForward = false;
+    setOverlay(() {
+      _panel = 'home';
+    });
   }
 
   void _killExiting() {
@@ -1119,9 +1125,15 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
     super.dispose();
   }
 
-  Widget _header(int level, String selProv,
-      StateSetter setOverlay, VoidCallback onBack) {
-    final titles = ['Provider', selProv, '思考深度'];
+  Widget _header(StateSetter setOverlay) {
+    final titles = {
+      'home': '配置',
+      'provider': 'Provider',
+      'model': 'Model',
+      'effort': '思考深度',
+    };
+    final title = titles[_panel] ?? '配置';
+    final showBack = _panel != 'home';
     return Container(
       padding: const EdgeInsets.fromLTRB(8, 6, 14, 6),
       decoration: const BoxDecoration(
@@ -1129,9 +1141,9 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
       ),
       child: Row(
         children: [
-          if (level > 0)
+          if (showBack)
             Pressable(
-              onTap: onBack,
+              onTap: () => _back(setOverlay),
               child: const SizedBox(
                 width: 28,
                 height: 28,
@@ -1146,8 +1158,8 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
             child: AnimatedSwitcher(
               duration: const Duration(milliseconds: 180),
               child: Text(
-                titles[level],
-                key: ValueKey(level),
+                title,
+                key: ValueKey(title),
                 textAlign: TextAlign.center,
                 style: AppText.callout.copyWith(fontWeight: FontWeight.w600),
                 maxLines: 1,
@@ -1161,63 +1173,118 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
     );
   }
 
-  Widget _levelList(
-    int level,
-    String selProv,
-    ValueChanged<String> onPickProv,
-    ValueChanged<String> onPickModel,
-    ValueChanged<String> onPickEffort,
-    StateSetter setOverlay,
-  ) {
-    if (level == 0) {
-      return Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          for (final p in _providers)
-            _row(p,
-                trailing: AppIcons.chevronRight,
-                selected: p == _provOf(_curModel),
-                onTap: () => onPickProv(p)),
-        ],
-      );
-    }
-    if (level == 1) {
-      final models = _modelsOf(selProv);
-      return Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          for (final o in models)
-            _row(o['name']?.toString() ?? o['value']?.toString() ?? '',
-                trailing: AppIcons.chevronRight,
-                selected: o['value'] == _curModel,
-                onTap: () => onPickModel(o['value']?.toString() ?? '')),
-          // 显式「思考深度」入口：选模型不再强制下钻（深度占位暂不下发），
-          // 想调深度再单独点进来（§9 级联，去摩擦）。
-          _row('思考深度',
-              trailing: AppIcons.chevronRight,
-              onTap: () {
-                _navForward = true;
-                setOverlay(() {
-                  level = 2;
-                });
-              }),
-        ],
-      );
-    }
-    // level 2：思考深度
+  Widget _panelList(StateSetter setOverlay) => _homePanel(setOverlay);
+
+  Widget _homePanel(StateSetter setOverlay) {
     return Column(
       mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        for (final e in widget.effortOpts)
-          _row(widget.effortLabel[e.id] ?? e.label,
-              selected: e.id == widget.effortId,
-              onTap: () => onPickEffort(e.id)),
+        _expandableGroup(
+          title: 'Provider',
+          value: _curProvider.isEmpty ? '—' : _curProvider,
+          expanded: _expandProvider,
+          onToggle: () => setOverlay(() => _expandProvider = !_expandProvider),
+          options: _providers.map((p) => _row(
+                p,
+                selected: p == _curProvider,
+                onTap: () {
+                  final first = _modelsOf(p).firstOrNull;
+                  if (first != null) {
+                    widget.onModel(first['value']?.toString() ?? '');
+                  }
+                },
+              )).toList(),
+        ),
+        _expandableGroup(
+          title: 'Model',
+          value: _curModelLabel,
+          expanded: _expandModel,
+          onToggle: () => setOverlay(() => _expandModel = !_expandModel),
+          options: _modelsOf(_curProvider).map((o) => _row(
+                o['name']?.toString() ?? o['value']?.toString() ?? '',
+                selected: o['value'] == _curModel,
+                onTap: () => widget.onModel(o['value']?.toString() ?? ''),
+              )).toList(),
+        ),
+        _expandableGroup(
+          title: 'Thinking',
+          value: _curEffortLabel,
+          expanded: _expandThinking,
+          onToggle: () => setOverlay(() => _expandThinking = !_expandThinking),
+          options: widget.effortOpts.map((e) => _row(
+                widget.effortLabel[e.id] ?? e.label,
+                selected: e.id == widget.effortId,
+                onTap: () => widget.onEffort(e.id),
+              )).toList(),
+        ),
       ],
     );
   }
 
+  Widget _expandableGroup({
+    required String title,
+    required String value,
+    required bool expanded,
+    required VoidCallback onToggle,
+    required List<Widget> options,
+  }) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Pressable(
+          onTap: onToggle,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            child: Row(
+              children: [
+                Text(title,
+                    style: AppText.callout.copyWith(
+                      color: AppColors.textPrimary,
+                      fontWeight: FontWeight.w600,
+                    )),
+                if (value.isNotEmpty) ...[
+                  const SizedBox(width: 10),
+                  Flexible(
+                    child: Text(value,
+                        textAlign: TextAlign.left,
+                        style: AppText.caption
+                            .copyWith(color: AppColors.textSecondary),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis),
+                  ),
+                  const Spacer(),
+                ] else
+                  const Spacer(),
+                AnimatedRotation(
+                  turns: expanded ? 0.5 : 0,
+                  duration: const Duration(milliseconds: 200),
+                  child: Icon(AppIcons.chevronDown,
+                      size: 14, color: AppColors.placeholder),
+                ),
+              ],
+            ),
+          ),
+        ),
+        AnimatedCrossFade(
+          firstChild: const SizedBox.shrink(),
+          secondChild: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: options,
+          ),
+          crossFadeState:
+              expanded ? CrossFadeState.showSecond : CrossFadeState.showFirst,
+          duration: const Duration(milliseconds: 200),
+        ),
+      ],
+    );
+  }
+
+
   Widget _row(String label,
-      {IconData? trailing, bool selected = false, required VoidCallback onTap}) {
+      {bool selected = false, required VoidCallback onTap}) {
     return Pressable(
       onTap: onTap,
       child: Padding(
@@ -1234,9 +1301,7 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
                   overflow: TextOverflow.ellipsis),
             ),
             if (selected)
-              const Icon(AppIcons.check, size: 15, color: AppColors.accent)
-            else if (trailing != null)
-              Icon(trailing, size: 14, color: AppColors.placeholder),
+              const Icon(AppIcons.check, size: 15, color: AppColors.accent),
           ],
         ),
       ),
@@ -1281,6 +1346,7 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
     );
   }
 }
+
 
 // ---------- 会话抽屉：真实 session.list + 搜索 + 工作区分组 ----------
 
