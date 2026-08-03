@@ -199,6 +199,10 @@ class RelayConfig {
 }
 
 /// 会话元信息（来自 session.list）。
+///
+/// 注：当前 kimi acp 不返回 archived / archivedAt / createdAt（见
+/// test/probe/session_list_probe_test gap #1）。归档状态由端侧
+/// SessionArchiveStore 维护，updatedAt 暂作为"创建/更新时间"近似。
 class SessionMeta {
   final String sessionId;
   final String cwd;

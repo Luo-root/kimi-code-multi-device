@@ -15,4 +15,5 @@ abstract final class AppRadius {
   static const double card = 20; // 卡片/批准卡/输入框
   static const double thumbnail = 12; // 缩略图/工具卡
   static const double pill = 999; // 胶囊按钮/状态点（全圆角）
+  static const double popup = 12; // 浮层/弹层圆角
 }

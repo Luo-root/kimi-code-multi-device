@@ -4,7 +4,9 @@ import 'package:hux/hux.dart';
 import 'package:flutter/services.dart';
 import '../relay/models.dart';
 import '../relay/relay_client.dart';
+import '../relay/session_archive_store.dart';
 import '../relay/session_store.dart';
+import '../relay/session_view.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
 import '../theme/app_dimens.dart';
@@ -14,6 +16,7 @@ import '../theme/theme_mode_store.dart';
 import '../widgets/common.dart';
 import '../widgets/stream_block.dart';
 import '../widgets/kimi_core.dart';
+import 'archive_sheet.dart';
 
 // ---------- 常量 ----------
 
@@ -88,6 +91,7 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   final _client = RelayClient();
   final _store = SessionStore();
+  final _archive = SessionArchiveStore();
   final _inputCtrl = TextEditingController();
   final _scrollCtrl = ScrollController();
   final _dockKey = GlobalKey();
@@ -116,6 +120,8 @@ class _HomeShellState extends State<HomeShell> {
     _client.onReconnecting = () => _store.markDisconnected(reconnecting: true);
     _store.addListener(_onStore);
     _scrollCtrl.addListener(_onScroll);
+    // 异步加载归档集合；失败不阻塞首屏。
+    _archive.load();
     _connect(_relayUrl);
   }
 
@@ -328,6 +334,16 @@ class _HomeShellState extends State<HomeShell> {
 
   void _newSession() => _client.send('new_session', payload: {});
 
+  void _openArchive() {
+    // 弹窗（showHuxBottomSheet）从抽屉之上叠出，抽屉无需先关。
+    showArchiveSheet(
+      context,
+      store: _store,
+      archive: _archive,
+      client: _client,
+    );
+  }
+
   void _decide(PermOption opt) {
     final p = _store.pendingOf(_store.currentSid);
     if (p == null) return;
@@ -444,23 +460,31 @@ class _HomeShellState extends State<HomeShell> {
       ),
       child: Scaffold(
       backgroundColor: AppColors.backgroundOf(context),
-      drawer: Drawer(
-        width: 280,
-        backgroundColor: AppColors.backgroundOf(context),
-        child: _SessionDrawer(
-          store: _store,
-          onPick: (m) {
-            Navigator.of(context).pop();
-            _openSession(m);
-          },
-          onNew: () {
-            Navigator.of(context).pop();
-            _newSession();
-          },
-          onOpenSettings: () {
-            Navigator.of(context).pop();
-            _openSettings();
-          },
+      drawer: SessionStoreScope(
+        store: _store,
+        child: SessionArchiveStoreScope(
+          store: _archive,
+          child: Drawer(
+            width: 280,
+            backgroundColor: AppColors.backgroundOf(context),
+            child: _SessionDrawer(
+              store: _store,
+              archive: _archive,
+              onPick: (m) {
+                Navigator.of(context).pop();
+                _openSession(m);
+              },
+              onNew: () {
+                Navigator.of(context).pop();
+                _newSession();
+              },
+              onOpenSettings: () {
+                Navigator.of(context).pop();
+                _openSettings();
+              },
+              onOpenArchive: _openArchive,
+            ),
+          ),
         ),
       ),
       body: SafeArea(
@@ -1350,18 +1374,22 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
 }
 
 
-// ---------- 会话抽屉：真实 session.list + 搜索 + 工作区分组 ----------
+// ---------- 会话抽屉：真实 session.list + 搜索 + 工作区分组 + 加载更多 + 归档 ----------
 
 class _SessionDrawer extends StatefulWidget {
   final SessionStore store;
+  final SessionArchiveStore archive;
   final ValueChanged<SessionMeta> onPick;
   final VoidCallback onNew;
   final VoidCallback onOpenSettings;
+  final VoidCallback onOpenArchive;
   const _SessionDrawer({
     required this.store,
+    required this.archive,
     required this.onPick,
     required this.onNew,
     required this.onOpenSettings,
+    required this.onOpenArchive,
   });
 
   @override
@@ -1374,7 +1402,27 @@ class _SessionDrawerState extends State<_SessionDrawer> {
   /// 折叠中的工作区分组（按 _groupKey）。搜索时自动忽略折叠，保证直达。
   final Set<String> _collapsed = {};
 
+  /// 每个工作区的"已展开条数"：默认 5，足够 90% 场景。
+  static const int _kPageSize = 5;
+  final Map<String, int> _expanded = {};
+
   bool get _searching => _q.trim().isNotEmpty;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.archive.addListener(_onChange);
+  }
+
+  @override
+  void dispose() {
+    widget.archive.removeListener(_onChange);
+    super.dispose();
+  }
+
+  void _onChange() {
+    if (mounted) setState(() {});
+  }
 
   void _toggleGroup(String key) {
     setState(() {
@@ -1382,13 +1430,10 @@ class _SessionDrawerState extends State<_SessionDrawer> {
     });
   }
 
-  String _groupKey(SessionMeta m) {
-    // Windows 路径用反斜杠分隔，这里兼容两种分隔符。
-    final parts =
-        m.cwd.split(RegExp(r'[/\\]')).where((p) => p.isNotEmpty).toList();
-    return parts.length >= 2
-        ? '${parts[parts.length - 2]}/${parts.last}'
-        : (parts.isNotEmpty ? parts.last : '—');
+  void _expandMore(String key) {
+    setState(() {
+      _expanded[key] = (_expanded[key] ?? _kPageSize) + _kPageSize;
+    });
   }
 
   // 匹配标题或工作目录路径（按目录找也是常见习惯）。
@@ -1401,12 +1446,19 @@ class _SessionDrawerState extends State<_SessionDrawer> {
 
   @override
   Widget build(BuildContext context) {
-    final all = widget.store.history.where(_match).toList();
-    final groups = <String, List<SessionMeta>>{};
-    for (final m in all) {
-      groups.putIfAbsent(_groupKey(m), () => []).add(m);
-    }
+    // 1) 搜索过滤 + 排除已归档（工作区抽屉只展示未归档的活跃/历史会话）。
+    final filtered = widget.store.history
+        .where(_match)
+        .where((m) => !widget.archive.isArchived(m.sessionId))
+        .toList();
+    // 2) 工作区分组 + 组内按时间倒序。
+    final wg = WorkspaceGroups.fold(
+      filtered,
+      pageSize: _kPageSize,
+      initialExpanded: _expanded,
+    );
     final cur = widget.store.currentSid;
+    final archiveCount = widget.archive.ids.length;
 
     return SafeArea(
       child: Column(
@@ -1439,21 +1491,25 @@ class _SessionDrawerState extends State<_SessionDrawer> {
             child: Text('工作区', style: AppText.monoCaption),
           ),
           Expanded(
-            child: groups.isEmpty
+            child: wg.groups.isEmpty
                 ? Center(
                     child: Text('无匹配会话', style: AppText.caption),
                   )
                 : ListView(
                     padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
                     children: [
-                      for (final entry in groups.entries) ...[
-                        _groupHeader(entry.key, entry.value.length),
+                      for (final entry in wg.groups) ...[
+                        _groupHeader(
+                          entry.key,
+                          entry.value.length,
+                          entry.value.map((m) => m.sessionId).toList(),
+                        ),
                         AnimatedCrossFade(
                           duration: const Duration(milliseconds: 180),
                           firstCurve: Curves.easeOut,
                           secondCurve: Curves.easeOut,
                           // 搜索时忽略折叠：所有匹配组展开，方便直达。
-                          // 其余情况完全由用户控制，含当前会话的组也可折叠。
+                          // 其余情况完全由用户控制。
                           crossFadeState:
                               (!_searching && _collapsed.contains(entry.key))
                                   ? CrossFadeState.showSecond
@@ -1461,8 +1517,19 @@ class _SessionDrawerState extends State<_SessionDrawer> {
                           firstChild: Column(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              for (final m in entry.value)
+                              for (final m in entry.value
+                                  .take(wg.expanded[entry.key] ??
+                                      entry.value.length))
                                 _row(m, m.sessionId == cur),
+                              // 加载更多：仅当还有未展示的会话时显示。
+                              if (wg.remainingOf(
+                                      entry.key, entry.value.length) >
+                                  0)
+                                _loadMore(
+                                  entry.key,
+                                  wg.remainingOf(
+                                      entry.key, entry.value.length),
+                                ),
                             ],
                           ),
                           secondChild:
@@ -1472,24 +1539,64 @@ class _SessionDrawerState extends State<_SessionDrawer> {
                     ],
                   ),
           ),
+          // 底部两行入口：已归档 + 设置。
           Container(
             decoration: BoxDecoration(
-              border: Border(top: BorderSide(color: AppColors.hairlineOf(context))),
+              border:
+                  Border(top: BorderSide(color: AppColors.hairlineOf(context))),
             ),
-            child: Pressable(
-              onTap: widget.onOpenSettings,
-              child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                child: Row(
-                  children: [
-                    Icon(AppIcons.settings,
-                        size: 18, color: AppColors.textSecondaryOf(context)),
-                    const SizedBox(width: 10),
-                    Text('设置', style: AppText.callout),
-                  ],
+            child: Column(
+              children: [
+                Pressable(
+                  onTap: widget.onOpenArchive,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 12),
+                    child: Row(
+                      children: [
+                        Icon(AppIcons.archive,
+                            size: 18,
+                            color: AppColors.textSecondaryOf(context)),
+                        const SizedBox(width: 10),
+                        Text('查看已归档', style: AppText.callout),
+                        const Spacer(),
+                        if (archiveCount > 0)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: AppColors.keyCapOf(context),
+                              borderRadius:
+                                  BorderRadius.circular(AppRadius.pill),
+                            ),
+                            child: Text('$archiveCount',
+                                style: AppText.monoCaption),
+                          ),
+                        const SizedBox(width: 4),
+                        Icon(AppIcons.chevronRight,
+                            size: 14,
+                            color: AppColors.placeholderOf(context)),
+                      ],
+                    ),
+                  ),
                 ),
-              ),
+                Pressable(
+                  onTap: widget.onOpenSettings,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 12),
+                    child: Row(
+                      children: [
+                        Icon(AppIcons.settings,
+                            size: 18,
+                            color: AppColors.textSecondaryOf(context)),
+                        const SizedBox(width: 10),
+                        Text('设置', style: AppText.callout),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
         ],
@@ -1497,31 +1604,64 @@ class _SessionDrawerState extends State<_SessionDrawer> {
     );
   }
 
-  /// 工作区分组头：可点击折叠/展开，右侧显示会话数。
-  Widget _groupHeader(String key, int count) {
+  /// 工作区分组头：可点击折叠/展开，右侧显示会话数与「…」菜单。
+  Widget _groupHeader(String key, int count, List<String> sids) {
     final collapsed = _collapsed.contains(key);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(0, 10, 4, 4),
+      child: Row(
+        children: [
+          // 折叠按钮：单独 44×44 触控区，避免和「…」冲突。
+          Expanded(
+            child: Pressable(
+              onTap: () => _toggleGroup(key),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(8, 0, 8, 0),
+                child: Row(
+                  children: [
+                    Icon(
+                        collapsed
+                            ? AppIcons.chevronRight
+                            : AppIcons.chevronDown,
+                        size: 14,
+                        color: AppColors.textSecondaryOf(context)),
+                    const SizedBox(width: 4),
+                    Icon(AppIcons.folder,
+                        size: 15,
+                        color: AppColors.textSecondaryOf(context)),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(key,
+                          style: AppText.calloutStrong,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis),
+                    ),
+                    Text('$count', style: AppText.monoCaption),
+                    const SizedBox(width: 2),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          _GroupMenu(workspaceKey: key, sessionIds: sids),
+        ],
+      ),
+    );
+  }
+
+  Widget _loadMore(String key, int remaining) {
     return Pressable(
-      onTap: () => _toggleGroup(key),
+      onTap: () => _expandMore(key),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(8, 10, 8, 4),
+        padding: const EdgeInsets.fromLTRB(28, 6, 16, 6),
         child: Row(
           children: [
-            Icon(
-                collapsed ? AppIcons.chevronRight : AppIcons.chevronDown,
-                size: 14,
-                color: AppColors.textSecondaryOf(context)),
+            Text('加载更多 $remaining 个对话',
+                style: AppText.callout.copyWith(
+                    color: AppColors.accentOf(context))),
             const SizedBox(width: 4),
-            Icon(AppIcons.folder,
-                size: 15, color: AppColors.textSecondaryOf(context)),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(key,
-                  style: AppText.calloutStrong,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis),
-            ),
-            Text('$count', style: AppText.monoCaption),
-            const SizedBox(width: 2),
+            Icon(AppIcons.chevronDown,
+                size: 12, color: AppColors.accentOf(context)),
           ],
         ),
       ),
@@ -1551,16 +1691,20 @@ class _SessionDrawerState extends State<_SessionDrawer> {
               ),
               Expanded(
                 child: Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 9, 12, 9),
+                  padding: const EdgeInsets.fromLTRB(12, 9, 8, 9),
                   child: Text(
                     m.title.isEmpty ? '（无标题）' : m.title,
-                    style: (sel ? AppText.calloutStrong : AppText.callout).copyWith(
-                      color: AppColors.textPrimaryOf(context),
-                    ),
+                    style: (sel ? AppText.calloutStrong : AppText.callout)
+                        .copyWith(color: AppColors.textPrimaryOf(context)),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
+              ),
+              // 行内"…"菜单：复制 ID / 归档 / 等等。
+              Padding(
+                padding: const EdgeInsets.only(right: 4),
+                child: _SessionRowMenu(meta: m),
               ),
             ],
           ),
@@ -1568,6 +1712,262 @@ class _SessionDrawerState extends State<_SessionDrawer> {
       ),
     );
   }
+}
+
+/// 工作区抽屉的行内"…"菜单。
+/// 现阶段只有复制 ID 与归档是真实能力；其它（重命名/分叉/导出）等待 kimi
+/// acp 补 API（见 test/probe/session_list_probe_test gap #2），暂以占位
+/// 提示呈现，不空跑。
+class _SessionRowMenu extends StatelessWidget {
+  final SessionMeta meta;
+  const _SessionRowMenu({required this.meta});
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<_RowMenuAction>(
+      tooltip: '更多',
+      offset: const Offset(0, 28),
+      color: AppColors.surfaceOf(context),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(AppRadius.popup),
+        side: BorderSide(color: AppColors.hairlineOf(context)),
+      ),
+      itemBuilder: (_) => const [
+        PopupMenuItem(
+          value: _RowMenuAction.copyId,
+          height: 36,
+          child: _SessionMenuItem(
+              icon: AppIcons.copy, label: '复制 Session ID'),
+        ),
+        PopupMenuItem(
+          value: _RowMenuAction.rename,
+          height: 36,
+          child: _SessionMenuItem(icon: AppIcons.command, label: '重命名'),
+        ),
+        PopupMenuItem(
+          value: _RowMenuAction.fork,
+          height: 36,
+          child:
+              _SessionMenuItem(icon: AppIcons.ellipsis, label: '分叉会话'),
+        ),
+        PopupMenuItem(
+          value: _RowMenuAction.export,
+          height: 36,
+          child: _SessionMenuItem(icon: AppIcons.arrowLeft, label: '导出会话'),
+        ),
+        PopupMenuDivider(height: 1),
+        PopupMenuItem(
+          value: _RowMenuAction.archive,
+          height: 36,
+          child: _SessionMenuItem(
+            icon: AppIcons.archive,
+            label: '归档',
+            danger: true,
+          ),
+        ),
+      ],
+      onSelected: (a) => _onSelected(context, a),
+      child: Padding(
+        padding: const EdgeInsets.all(6),
+        child: Icon(AppIcons.ellipsis,
+            size: 16, color: AppColors.placeholderOf(context)),
+      ),
+    );
+  }
+
+  void _onSelected(BuildContext context, _RowMenuAction a) {
+    final rootCtx = context;
+    final archive = SessionArchiveStoreScope.of(rootCtx);
+    switch (a) {
+      case _RowMenuAction.copyId:
+        copyToClipboard(rootCtx, meta.sessionId);
+      case _RowMenuAction.archive:
+        archive.archive(meta.sessionId);
+        if (rootCtx.mounted) {
+          rootCtx.showHuxSnackbar(
+            message:
+                '已归档：${meta.title.isEmpty ? "（无标题）" : meta.title}',
+            variant: HuxSnackbarVariant.success,
+            duration: const Duration(milliseconds: 1500),
+          );
+        }
+      case _RowMenuAction.rename:
+      case _RowMenuAction.fork:
+      case _RowMenuAction.export:
+        // 等待 kimi acp 补 API（gap #2），暂以 toast 告知，避免空跑。
+        if (rootCtx.mounted) {
+          rootCtx.showHuxSnackbar(
+            message: '${_labelOf(a)} 即将支持',
+            variant: HuxSnackbarVariant.info,
+            duration: const Duration(milliseconds: 1500),
+          );
+        }
+    }
+  }
+
+  String _labelOf(_RowMenuAction a) => switch (a) {
+        _RowMenuAction.copyId => '复制 Session ID',
+        _RowMenuAction.rename => '重命名',
+        _RowMenuAction.fork => '分叉会话',
+        _RowMenuAction.export => '导出会话',
+        _RowMenuAction.archive => '归档',
+      };
+}
+
+enum _RowMenuAction { copyId, rename, fork, export, archive }
+
+class _SessionMenuItem extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool danger;
+  const _SessionMenuItem(
+      {required this.icon, required this.label, this.danger = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = danger ? AppColors.reject : AppColors.textPrimaryOf(context);
+    return Row(
+      children: [
+        Icon(icon, size: 14, color: color),
+        const SizedBox(width: 10),
+        Text(label, style: AppText.callout.copyWith(color: color)),
+      ],
+    );
+  }
+}
+
+/// 工作区分组头的「…」菜单：复制工作区路径 / 归档该工作区 / 重命名 / 移除工作区。
+/// 仅「复制路径」与「归档」是真实能力，其余等 kimi acp 补 API（见
+/// test/probe/session_list_probe_test gap #2），暂以 toast 告知。
+class _GroupMenu extends StatelessWidget {
+  final String workspaceKey; // sessionGroupKey（路径末两级）
+  final List<String> sessionIds; // 该工作区当前可见（未归档）会话的 sid
+  const _GroupMenu({required this.workspaceKey, required this.sessionIds});
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<_GroupMenuAction>(
+      tooltip: '工作区操作',
+      offset: const Offset(0, 32),
+      color: AppColors.surfaceOf(context),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(AppRadius.popup),
+        side: BorderSide(color: AppColors.hairlineOf(context)),
+      ),
+      itemBuilder: (_) => [
+        const PopupMenuItem(
+          value: _GroupMenuAction.copyPath,
+          height: 36,
+          child: _SessionMenuItem(icon: AppIcons.copy, label: '复制工作区路径'),
+        ),
+        const PopupMenuItem(
+          value: _GroupMenuAction.archiveWorkspace,
+          height: 36,
+          child: _SessionMenuItem(icon: AppIcons.archive, label: '归档工作区'),
+        ),
+        const PopupMenuItem(
+          value: _GroupMenuAction.rename,
+          height: 36,
+          child: _SessionMenuItem(icon: AppIcons.rename, label: '重命名工作区'),
+        ),
+        const PopupMenuDivider(height: 1),
+        const PopupMenuItem(
+          value: _GroupMenuAction.remove,
+          height: 36,
+          child: _SessionMenuItem(
+            icon: AppIcons.remove,
+            label: '移除工作区',
+            danger: true,
+          ),
+        ),
+      ],
+      onSelected: (a) => _onSelected(context, a),
+      child: SizedBox(
+        width: 36,
+        height: 36,
+        child: Center(
+          child: Icon(AppIcons.ellipsis,
+              size: 16, color: AppColors.placeholderOf(context)),
+        ),
+      ),
+    );
+  }
+
+  void _onSelected(BuildContext context, _GroupMenuAction a) {
+    final rootCtx = context;
+    final archive = SessionArchiveStoreScope.of(rootCtx);
+    switch (a) {
+      case _GroupMenuAction.copyPath:
+        // 复制完整工作区路径（而非 last two key）：从 store 里反查。
+        final store = SessionStoreScope.of(rootCtx);
+        final fullCwd = _resolveFullCwd(store);
+        if (fullCwd == null) return;
+        copyToClipboard(rootCtx, fullCwd);
+      case _GroupMenuAction.archiveWorkspace:
+        final n = archive.archiveAll(sessionIds);
+        if (rootCtx.mounted) {
+          rootCtx.showHuxSnackbar(
+            message: n > 0
+                ? '已归档工作区「$workspaceKey」下的 $n 个会话'
+                : '工作区「$workspaceKey」下没有需要归档的会话',
+            variant: n > 0
+                ? HuxSnackbarVariant.success
+                : HuxSnackbarVariant.info,
+            duration: const Duration(milliseconds: 1800),
+          );
+        }
+      case _GroupMenuAction.rename:
+      case _GroupMenuAction.remove:
+        if (rootCtx.mounted) {
+          rootCtx.showHuxSnackbar(
+            message: '${_labelOf(a)}即将支持',
+            variant: HuxSnackbarVariant.info,
+            duration: const Duration(milliseconds: 1500),
+          );
+        }
+    }
+  }
+
+  /// 在 store.history 里反查工作区的完整 cwd。找不到时返回 null。
+  String? _resolveFullCwd(SessionStore store) {
+    for (final m in store.history) {
+      if (sessionGroupKey(m.cwd) == workspaceKey) return m.cwd;
+    }
+    return null;
+  }
+
+  String _labelOf(_GroupMenuAction a) => switch (a) {
+        _GroupMenuAction.copyPath => '复制工作区路径',
+        _GroupMenuAction.archiveWorkspace => '归档工作区',
+        _GroupMenuAction.rename => '重命名工作区',
+        _GroupMenuAction.remove => '移除工作区',
+      };
+}
+
+enum _GroupMenuAction { copyPath, archiveWorkspace, rename, remove }
+
+/// 让 _SessionRowMenu（无 BuildContext 上下文）能拿到全局 SessionStore / Archive。
+/// 抽屉由 _HomeShellState 直接 build，所以这两个对象就近放在 InheritedWidget。
+class SessionStoreScope extends InheritedWidget {
+  final SessionStore store;
+  const SessionStoreScope(
+      {super.key, required this.store, required super.child});
+  static SessionStore of(BuildContext c) =>
+      c.dependOnInheritedWidgetOfExactType<SessionStoreScope>()!.store;
+  @override
+  bool updateShouldNotify(SessionStoreScope old) => old.store != store;
+}
+
+class SessionArchiveStoreScope extends InheritedWidget {
+  final SessionArchiveStore store;
+  const SessionArchiveStoreScope(
+      {super.key, required this.store, required super.child});
+  static SessionArchiveStore of(BuildContext c) => c
+      .dependOnInheritedWidgetOfExactType<SessionArchiveStoreScope>()!
+      .store;
+  @override
+  bool updateShouldNotify(SessionArchiveStoreScope old) =>
+      old.store != store;
 }
 
 // ---------- AI 身份标识（§3.2-1：每轮输出顶部）----------
@@ -1774,15 +2174,13 @@ class _BottomDock extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        // 消息区与 dock 之间的过渡带：原方案用 24px 渐变 [0x00F7F8FA → background]
+        // 想做"消息尾融入画布"的渐隐效果。但 0x00F7F8FA 是 alpha=0 浅灰——浅色下看不见，
+        // 暗色下却被 Skia premultiplied alpha 渲染成可见白条。改成 4px 纯色画布，
+        // 保留一点点呼吸，但不画渐变。明暗自适应。
         Container(
-          height: 24,
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-              colors: [const Color(0x00F7F8FA), AppColors.backgroundOf(context)],
-            ),
-          ),
+          height: 4,
+          color: AppColors.backgroundOf(context),
         ),
         Container(
           color: AppColors.backgroundOf(context),
@@ -1914,23 +2312,22 @@ class _InputBar extends StatelessWidget {
   });
   @override
   Widget build(BuildContext context) {
-    // HuxInput 固定 40px、HuxTextarea 暂未暴露自动纠错等代码输入参数。
-    // composer 使用 HuxCard 承载 Hux 表面/边框，内部保留多行代码输入行为。
-    return HuxCard(
-      size: HuxCardSize.large,
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      borderRadius: AppRadius.card,
-      backgroundColor: AppColors.surfaceOf(context),
+    // 药丸形 composer：去 HuxCard 边框，整块铺 keyCap 浅底（hux 中性柔和，明暗自适应）。
+    // 三键（+ / send / stop）统一用 Material+InkWell 圆形，与外层药丸视觉对齐。
+    return Container(
+      decoration: BoxDecoration(
+        color: AppColors.keyCapOf(context),
+        borderRadius: BorderRadius.circular(AppRadius.pill),
+      ),
+      padding: const EdgeInsets.all(6),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          // §UX-10.2-1：与发送/停止统一为 hux 图标按钮（32×32），消除与原输入框的视觉割裂。
-          HuxButton(
-            onPressed: onOpenPlus,
-            variant: HuxButtonVariant.ghost,
-            size: HuxButtonSize.small,
+          _circleIconBtn(
+            bg: AppColors.surfaceOf(context),
             icon: AppIcons.plus,
-            child: const SizedBox(width: 0),
+            iconColor: AppColors.textPrimaryOf(context),
+            onTap: onOpenPlus,
           ),
           const SizedBox(width: AppSpacing.sm),
           Expanded(
@@ -1952,6 +2349,13 @@ class _InputBar extends StatelessWidget {
               decoration: InputDecoration(
                 isCollapsed: true,
                 border: InputBorder.none,
+                // 主题默认会给 InputDecorationTheme 一个 enabledBorder 描边，
+                // 这里在 composer 里彻底关掉，否则会看到内嵌一圈淡灰线条。
+                enabledBorder: InputBorder.none,
+                focusedBorder: InputBorder.none,
+                disabledBorder: InputBorder.none,
+                errorBorder: InputBorder.none,
+                focusedErrorBorder: InputBorder.none,
                 hintText: enabled ? '尽管问…' : '先连接中继',
                 hintStyle: AppText.placeholder,
                 contentPadding: const EdgeInsets.symmetric(vertical: 8),
@@ -1959,28 +2363,49 @@ class _InputBar extends StatelessWidget {
             ),
           ),
           const SizedBox(width: AppSpacing.sm),
-          // §13「停」可见性随状态：流式中亮且显眼（占发送位），空闲时是发送。
-          running
-              ? HuxButton(
-                  onPressed: onStop,
-                  variant: HuxButtonVariant.primary,
-                  primaryColor: AppColors.reject,
-                  textColor: AppColors.surfaceOf(context),
-                  size: HuxButtonSize.small,
-                  icon: AppIcons.stop,
-                  child: const SizedBox(width: 0),
-                )
-              : HuxButton(
-                  onPressed: enabled ? () => onSend(controller.text) : null,
-                  variant: HuxButtonVariant.primary,
-                  primaryColor: AppColors.textPrimaryOf(context),
-                  textColor: AppColors.surfaceOf(context),
-                  size: HuxButtonSize.small,
-                  isDisabled: !enabled,
-                  icon: AppIcons.send,
-                  child: const SizedBox(width: 0),
-                ),
+          // §13「停」可见性随状态：流式中亮且显眼（圆 + reject 红），空闲时是发送（圆 + 黑）。
+          if (running)
+            _circleIconBtn(
+              bg: AppColors.reject,
+              icon: AppIcons.stop,
+              iconColor: AppColors.surfaceOf(context),
+              onTap: onStop,
+            )
+          else
+            _circleIconBtn(
+              bg: AppColors.textPrimaryOf(context),
+              icon: AppIcons.send,
+              iconColor: AppColors.surfaceOf(context),
+              onTap: enabled ? () => onSend(controller.text) : null,
+            ),
         ],
+      ),
+    );
+  }
+
+  /// 36×36 圆形图标按钮：与 + 按钮共用同一形状，三键视觉对齐。
+  /// disabled 时整体 0.45 透明，比换灰底色更克制、不抢焦点。
+  Widget _circleIconBtn({
+    required Color bg,
+    required IconData icon,
+    required Color iconColor,
+    required VoidCallback? onTap,
+  }) {
+    final isEnabled = onTap != null;
+    return Opacity(
+      opacity: isEnabled ? 1.0 : 0.45,
+      child: Material(
+        color: bg,
+        shape: const CircleBorder(),
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onTap,
+          child: SizedBox(
+            width: 36,
+            height: 36,
+            child: Icon(icon, size: 18, color: iconColor),
+          ),
+        ),
       ),
     );
   }
