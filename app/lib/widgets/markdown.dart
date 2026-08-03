@@ -60,19 +60,13 @@ class MarkdownView extends StatelessWidget {
 MarkdownStyleSheet _styleSheet(BuildContext context) {
   final base = MarkdownStyleSheet.fromTheme(Theme.of(context));
   return base.copyWith(
-    p: AppText.body.copyWith(height: 1.6),
-    h1: AppText.body.copyWith(
-        fontSize: 19, fontWeight: FontWeight.w700, height: 1.35),
-    h2: AppText.body.copyWith(
-        fontSize: 17.5, fontWeight: FontWeight.w700, height: 1.35),
-    h3: AppText.body.copyWith(
-        fontSize: 16, fontWeight: FontWeight.w700, height: 1.35),
-    h4: AppText.body.copyWith(
-        fontSize: 15, fontWeight: FontWeight.w700, height: 1.35),
-    h5: AppText.body.copyWith(
-        fontSize: 15, fontWeight: FontWeight.w700, height: 1.35),
-    h6: AppText.body.copyWith(
-        fontSize: 15, fontWeight: FontWeight.w700, height: 1.35),
+    p: AppText.body,
+    h1: AppText.markdownH1,
+    h2: AppText.markdownH2,
+    h3: AppText.markdownH3,
+    h4: AppText.markdownH4,
+    h5: AppText.markdownH5,
+    h6: AppText.markdownH6,
     em: AppText.body.copyWith(fontStyle: FontStyle.italic),
     strong: AppText.body.copyWith(fontWeight: FontWeight.w700),
     blockquote: AppText.callout.copyWith(
@@ -83,9 +77,8 @@ MarkdownStyleSheet _styleSheet(BuildContext context) {
     blockquotePadding: const EdgeInsets.only(left: 10),
     listBullet: AppText.body.copyWith(color: AppColors.textSecondaryOf(context)),
     // 行内码：等宽 + 浅灰底（无圆角，受 TextStyle 限制）。
-    code: AppText.mono.copyWith(fontSize: 12, backgroundColor: AppColors.keyCapOf(context)),
-    a: TextStyle(
-        color: AppColors.accentOf(context), decoration: TextDecoration.underline),
+    code: AppText.mono.copyWith(backgroundColor: AppColors.keyCapOf(context)),
+    a: AppText.link.copyWith(color: AppColors.accentOf(context)),
     horizontalRuleDecoration: BoxDecoration(
       border: Border(top: BorderSide(color: AppColors.hairlineOf(context))),
     ),

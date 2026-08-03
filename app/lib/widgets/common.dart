@@ -517,9 +517,8 @@ class _DropdownItemState extends State<_DropdownItem> {
                 children: [
                   Text(
                     widget.option.label,
-                    style: AppText.body.copyWith(
+                    style: AppText.bodyStrong.copyWith(
                       color: AppColors.textPrimaryOf(context),
-                      fontWeight: FontWeight.w600,
                     ),
                   ),
                   if (hasSub) ...[
