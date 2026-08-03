@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../theme/app_colors.dart';
@@ -11,6 +12,7 @@ import '../theme/app_icons.dart';
 void copyToClipboard(ScaffoldMessengerState messenger, String text) {
   if (text.isEmpty) return;
   Clipboard.setData(ClipboardData(text: text));
+  HapticFeedback.selectionClick(); // §UX-8.2-2：复制 = .selection。
   messenger.showSnackBar(
     SnackBar(
       content: Text('已复制',
@@ -23,7 +25,78 @@ void copyToClipboard(ScaffoldMessengerState messenger, String text) {
   );
 }
 
-/// 按压反馈：轻量透明度变化。
+/// §UX-2.2 复制按钮：复制成功后图标就地变勾 1.5s（不再用 SnackBar）。
+/// 视觉 30px，命中区域扩展至 44×44pt（§UX-2.1-6 触控标准）。
+/// [dark] 用于深色代码块内（幽灵按钮，白字）。
+class CopyButton extends StatefulWidget {
+  final String text;
+  final bool dark;
+  const CopyButton({super.key, required this.text, this.dark = false});
+
+  @override
+  State<CopyButton> createState() => _CopyButtonState();
+}
+
+class _CopyButtonState extends State<CopyButton> {
+  bool _done = false;
+  Timer? _reset;
+
+  void _copy() {
+    if (widget.text.isEmpty) return;
+    Clipboard.setData(ClipboardData(text: widget.text));
+    HapticFeedback.selectionClick();
+    setState(() => _done = true);
+    _reset?.cancel();
+    _reset = Timer(const Duration(milliseconds: 1500), () {
+      if (mounted) setState(() => _done = false);
+    });
+  }
+
+  @override
+  void dispose() {
+    _reset?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bg = widget.dark
+        ? const Color(0x33FFFFFF)
+        : (_done ? AppColors.approveSoft : AppColors.keyCap);
+    final fg = widget.dark
+        ? (_done ? AppColors.approve : const Color(0xFFC7C7CC))
+        : (_done ? AppColors.approve : AppColors.textSecondary);
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: _copy,
+      // 命中区域 44×44，视觉居中 30px。
+      child: SizedBox(
+        width: 44,
+        height: 44,
+        child: Center(
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            curve: Curves.easeOut,
+            width: 30,
+            height: 30,
+            decoration: BoxDecoration(color: bg, shape: BoxShape.circle),
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 150),
+              child: Icon(
+                _done ? AppIcons.check : AppIcons.copy,
+                key: ValueKey(_done),
+                size: 14,
+                color: fg,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 按压反馈：opacity 0.7 + scale 0.96，松开带轻微回弹（§UX-8.2-1）。
 class Pressable extends StatefulWidget {
   final Widget child;
   final VoidCallback onTap;
@@ -43,11 +116,144 @@ class _PressableState extends State<Pressable> {
       onTapUp: (_) => setState(() => _down = false),
       onTapCancel: () => setState(() => _down = false),
       onTap: widget.onTap,
-      child: AnimatedOpacity(
-        opacity: _down ? 0.55 : 1.0,
-        duration: const Duration(milliseconds: 120),
-        child: widget.child,
+      child: AnimatedScale(
+        scale: _down ? 0.96 : 1.0,
+        // 按下快速响应，松开用 easeOutBack 带一点回弹。
+        duration: Duration(milliseconds: _down ? 90 : 180),
+        curve: _down ? Curves.easeOut : Curves.easeOutBack,
+        child: AnimatedOpacity(
+          opacity: _down ? 0.7 : 1.0,
+          duration: const Duration(milliseconds: 120),
+          child: widget.child,
+        ),
       ),
+    );
+  }
+}
+
+// ---------- 弹出动画基建（§UX-1 弹出菜单体系）----------
+
+/// 全局弹层关闭栈：Android 返回手势优先关闭最上层弹层，而非直接退出页面（§UX-1.5）。
+/// 各 Overlay 弹层打开时注册自己的 closer，关闭时反注册。
+class PopupRegistry extends ChangeNotifier {
+  PopupRegistry._();
+  static final PopupRegistry instance = PopupRegistry._();
+
+  final List<VoidCallback> _closers = [];
+
+  bool get hasOpen => _closers.isNotEmpty;
+
+  void register(VoidCallback closer) {
+    _closers.add(closer);
+    notifyListeners();
+  }
+
+  void unregister(VoidCallback closer) {
+    _closers.remove(closer);
+    notifyListeners();
+  }
+
+  /// 关闭最上层弹层。返回是否有关闭发生。
+  bool closeTopmost() {
+    if (_closers.isEmpty) return false;
+    _closers.removeLast()();
+    return true;
+  }
+}
+
+/// 弹层入场/退场动画容器（§UX-1.1 / §UX-1.4）：
+/// - 入场：scale 0.95→1.0 + fade 0→1，180ms easeOut，锚点 [origin]；
+/// - 退场：调用 [dismiss] 播放反向动画（120ms easeIn），结束后调用方再移除 OverlayEntry；
+/// - 自带轻量 scrim（黑 ~8% 渐入），点击 scrim 触发 [onScrimTap]。
+///
+/// 定位参数（top/bottom/left/right/width）透传给内部 Positioned。
+class PopupAnimator extends StatefulWidget {
+  final Widget child;
+  final Alignment origin;
+  final double? top;
+  final double? bottom;
+  final double? left;
+  final double? right;
+  final double? width;
+  final VoidCallback onScrimTap;
+
+  const PopupAnimator({
+    super.key,
+    required this.child,
+    required this.onScrimTap,
+    this.origin = Alignment.topLeft,
+    this.top,
+    this.bottom,
+    this.left,
+    this.right,
+    this.width,
+  });
+
+  @override
+  State<PopupAnimator> createState() => PopupAnimatorState();
+}
+
+class PopupAnimatorState extends State<PopupAnimator>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 180),
+    reverseDuration: const Duration(milliseconds: 120),
+  );
+  late final CurvedAnimation _curved = CurvedAnimation(
+    parent: _c,
+    curve: Curves.easeOut,
+    reverseCurve: Curves.easeIn,
+  );
+  late final Animation<double> _scale =
+      Tween(begin: 0.95, end: 1.0).animate(_curved);
+
+  @override
+  void initState() {
+    super.initState();
+    _c.forward();
+  }
+
+  /// 退场动画。结束后 resolve（调用方随后 entry.remove()）。
+  Future<void> dismiss() => _c.reverse();
+
+  @override
+  void dispose() {
+    _curved.dispose();
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: FadeTransition(
+            opacity: _curved,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: widget.onScrimTap,
+              child: Container(color: const Color(0x14000000)),
+            ),
+          ),
+        ),
+        Positioned(
+          top: widget.top,
+          bottom: widget.bottom,
+          left: widget.left,
+          right: widget.right,
+          width: widget.width,
+          child: FadeTransition(
+            opacity: _curved,
+            child: ScaleTransition(
+              scale: _scale,
+              alignment: widget.origin,
+              child: widget.child,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -129,43 +335,42 @@ class ChipDropdown extends StatefulWidget {
 
 class _ChipDropdownState extends State<ChipDropdown> {
   OverlayEntry? _entry;
+  /// 退场动画中尚未移除的 entry；重开时先强制移除，避免 GlobalKey 冲突。
+  OverlayEntry? _exiting;
+  final _popupKey = GlobalKey<PopupAnimatorState>();
   bool _triggerDown = false;
   bool get _open => _entry != null;
 
   void _toggle() => _open ? _close() : _openMenu();
 
   void _openMenu() {
+    _killExiting();
     final box = context.findRenderObject() as RenderBox;
     final off = box.localToGlobal(Offset.zero);
     final w = box.size.width;
     _entry = OverlayEntry(
-      builder: (ctx) => Stack(
-        children: [
-          Positioned.fill(
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: _close,
-              child: const SizedBox.shrink(),
-            ),
-          ),
-          widget.wide
-              ? Positioned(
-                  top: off.dy + box.size.height + 6,
-                  left: AppSpacing.pageMargin,
-                  right: AppSpacing.pageMargin,
-                  child: _menu(),
-                )
-              : Positioned(
-                  top: off.dy + box.size.height + 6,
-                  left: off.dx,
-                  width: w < widget.minWidth ? widget.minWidth : w,
-                  child: _menu(),
-                ),
-        ],
+      builder: (ctx) => PopupAnimator(
+        key: _popupKey,
+        onScrimTap: _close,
+        origin: Alignment.topLeft,
+        top: off.dy + box.size.height + 6,
+        left: widget.wide ? AppSpacing.pageMargin : off.dx,
+        right: widget.wide ? AppSpacing.pageMargin : null,
+        width: widget.wide ? null : (w < widget.minWidth ? widget.minWidth : w),
+        child: _menu(),
       ),
     );
     Overlay.of(context).insert(_entry!);
+    PopupRegistry.instance.register(_close);
     setState(() {});
+  }
+
+  void _killExiting() {
+    final e = _exiting;
+    if (e != null) {
+      _exiting = null;
+      e.remove();
+    }
   }
 
   Widget _menu() {
@@ -194,14 +399,30 @@ class _ChipDropdownState extends State<ChipDropdown> {
   }
 
   void _close() {
-    _entry?.remove();
+    final entry = _entry;
+    if (entry == null) return;
     _entry = null;
+    PopupRegistry.instance.unregister(_close);
     if (mounted) setState(() {});
+    // 先播退场动画再移除 entry（§UX-1.1：反向 120ms easeIn）。
+    final st = _popupKey.currentState;
+    if (st == null) {
+      entry.remove();
+      return;
+    }
+    _exiting = entry;
+    st.dismiss().then((_) {
+      if (_exiting != entry) return; // 已被重开逻辑强制移除。
+      _exiting = null;
+      entry.remove();
+    });
   }
 
   @override
   void dispose() {
+    if (_entry != null) PopupRegistry.instance.unregister(_close);
     _entry?.remove();
+    _killExiting();
     super.dispose();
   }
 

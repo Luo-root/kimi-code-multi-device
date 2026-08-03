@@ -35,4 +35,8 @@ abstract final class AppIcons {
   static const IconData terminal = LucideIcons.terminal;
   static const IconData check = LucideIcons.check;
   static const IconData copy = LucideIcons.copy; // 复制消息 / 代码 / 命令
+
+  // 批准卡
+  static const IconData clock = LucideIcons.clock; // 倒计时
+  static const IconData alertTriangle = LucideIcons.triangle_alert; // 超时警示
 }
