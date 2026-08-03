@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:hux/hux.dart';
 import 'package:flutter/services.dart';
 import '../relay/models.dart';
 import '../relay/relay_client.dart';
@@ -9,9 +10,9 @@ import '../theme/app_text_styles.dart';
 import '../theme/app_dimens.dart';
 import '../theme/app_shadows.dart';
 import '../theme/app_icons.dart';
+import '../theme/theme_mode_store.dart';
 import '../widgets/common.dart';
 import '../widgets/stream_block.dart';
-import '../widgets/generating.dart';
 import '../widgets/kimi_core.dart';
 
 // ---------- 常量 ----------
@@ -229,15 +230,10 @@ class _HomeShellState extends State<HomeShell> {
     if (t.isEmpty || sid == null || _store.relayState != 'ok') return;
     // §UX-5.1-2：busy 时不再静默吞掉发送——给出明确反馈。
     if (_store.busyOf(sid)) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Kimi 正在输出，完成后才能发送下一条',
-              style: AppText.callout.copyWith(color: AppColors.surface)),
-          backgroundColor: AppColors.textPrimary,
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          duration: const Duration(milliseconds: 1600),
-        ),
+      context.showHuxSnackbar(
+        message: 'Kimi 正在输出，完成后才能发送下一条',
+        variant: HuxSnackbarVariant.warning,
+        duration: const Duration(milliseconds: 1600),
       );
       return;
     }
@@ -281,60 +277,39 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   void _onAttach() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('附件上传即将支持',
-            style: AppText.callout.copyWith(color: AppColors.surface)),
-        backgroundColor: AppColors.textPrimary,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        duration: const Duration(milliseconds: 1600),
-      ),
+    context.showHuxSnackbar(
+      message: '附件上传即将支持',
+      variant: HuxSnackbarVariant.info,
+      duration: const Duration(milliseconds: 1600),
     );
   }
 
-  /// §UX-7.2-3：relay.error 可见化——非阻断 toast 展示错误摘要，
+  /// §UX-7.2-3：relay.error 可见化——非阻断 toast 展示错误摘要（hux 语义色），
   /// 点「详情」看全文（可选中复制）。
   void _showRelayError(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message,
-            style: AppText.callout.copyWith(color: AppColors.surface),
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis),
-        backgroundColor: AppColors.reject,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        duration: const Duration(milliseconds: 4000),
-        action: SnackBarAction(
+    context.showHuxSnackbar(
+      message: message,
+      variant: HuxSnackbarVariant.error,
+      duration: const Duration(milliseconds: 4000),
+      actions: [
+        HuxSnackbarAction(
           label: '详情',
-          textColor: AppColors.surface,
-          onPressed: () => showDialog<void>(
+          onPressed: () => showHuxDialog<void>(
             context: context,
-            builder: (_) => AlertDialog(
-              backgroundColor: AppColors.surface,
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(AppRadius.card)),
-              title: Text('中继报错', style: AppText.title2),
-              content: SingleChildScrollView(
-                child: SelectableText(message, style: AppText.mono),
-              ),
-              actions: [
-                Pressable(
-                  onTap: () => Navigator.of(context).pop(),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 8),
-                    child: Text('关闭',
-                        style:
-                            AppText.callout.copyWith(color: AppColors.accent)),
-                  ),
-                ),
-              ],
+            title: '中继报错',
+            content: SingleChildScrollView(
+              child: SelectableText(message, style: AppText.mono),
             ),
+            actions: [
+              HuxButton(
+                onPressed: () => Navigator.of(context).pop(),
+                variant: HuxButtonVariant.secondary,
+                child: const Text('关闭'),
+              ),
+            ],
           ),
         ),
-      ),
+      ],
     );
   }
 
@@ -377,7 +352,7 @@ class _HomeShellState extends State<HomeShell> {
   void _openSettings() => showModalBottomSheet(
         context: context,
         isScrollControlled: true,
-        backgroundColor: AppColors.surface,
+        backgroundColor: AppColors.surfaceOf(context),
         shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
         ),
@@ -468,10 +443,10 @@ class _HomeShellState extends State<HomeShell> {
         child: child!,
       ),
       child: Scaffold(
-      backgroundColor: AppColors.background,
+      backgroundColor: AppColors.backgroundOf(context),
       drawer: Drawer(
         width: 280,
-        backgroundColor: AppColors.background,
+        backgroundColor: AppColors.backgroundOf(context),
         child: _SessionDrawer(
           store: _store,
           onPick: (m) {
@@ -580,13 +555,13 @@ class _HomeShellState extends State<HomeShell> {
                         ),
                   // §3.2-4 全局生成状态条：busy 全程 2px indeterminate 进度，输出完收起。
                   if (running)
-                    const Positioned(
+                    Positioned(
                       top: 0,
                       left: 0,
                       right: 0,
                       child: LinearProgressIndicator(
                         backgroundColor: Colors.transparent,
-                        color: AppColors.accent,
+                        color: AppColors.accentOf(context),
                         minHeight: 2,
                       ),
                     ),
@@ -669,7 +644,7 @@ class _TopBar extends StatelessWidget {
     final dot = switch (relayState) {
       'ok' => AppColors.approve,
       'degraded' => AppColors.warning,
-      _ => AppColors.placeholder,
+      _ => AppColors.placeholderOf(context),
     };
 
     return Padding(
@@ -678,6 +653,17 @@ class _TopBar extends StatelessWidget {
         children: [
           _iconBtn(AppIcons.menu,
               onTap: () => Scaffold.of(context).openDrawer()),
+          const SizedBox(width: 2),
+          // 主题切换（浅色/暗色），偏好持久化。
+          ValueListenableBuilder<ThemeMode>(
+            valueListenable: themeModeNotifier,
+            builder: (_, mode, _) => _iconBtn(
+              mode == ThemeMode.dark ? AppIcons.sun : AppIcons.moon,
+              onTap: () => setThemeMode(
+                mode == ThemeMode.dark ? ThemeMode.light : ThemeMode.dark,
+              ),
+            ),
+          ),
           const SizedBox(width: 6),
           // provider·model·思考深度 → 一个级联主菜单（§09 级联结构）。
           Expanded(
@@ -707,14 +693,12 @@ class _TopBar extends StatelessWidget {
   }
 
   Widget _iconBtn(IconData icon, {VoidCallback? onTap}) {
-    return Pressable(
-      onTap: onTap ?? () {},
-      // §UX-10.2-1：命中区域 44×44。
-      child: SizedBox(
-        width: 44,
-        height: 44,
-        child: Icon(icon, size: 20, color: AppColors.textPrimary),
-      ),
+    return HuxButton(
+      onPressed: onTap ?? () {},
+      variant: HuxButtonVariant.ghost,
+      size: HuxButtonSize.small,
+      icon: icon,
+      child: const SizedBox(width: 0),
     );
   }
 }
@@ -779,15 +763,16 @@ class _ModeIconMenuState extends State<_ModeIconMenu> {
         bottom: above ? (vh - off.dy + 6) : null,
         right: 8,
         width: 168,
-        child: Container(
-          clipBehavior: Clip.antiAlias,
-          decoration: BoxDecoration(
-            color: AppColors.surface,
-            borderRadius: BorderRadius.circular(AppRadius.card),
-            boxShadow: AppShadows.popup,
-          ),
+        child: HuxCard(
+          margin: EdgeInsets.zero,
           padding: const EdgeInsets.symmetric(vertical: 8),
-          child: ConstrainedBox(
+          borderRadius: AppRadius.card,
+          backgroundColor: AppColors.surfaceOf(context),
+          borderColor: AppColors.hairlineOf(context),
+          elevation: 0,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(AppRadius.card),
+            child: ConstrainedBox(
             constraints: BoxConstraints(maxHeight: _menuMaxH),
             child: SingleChildScrollView(
               child: Column(
@@ -808,6 +793,7 @@ class _ModeIconMenuState extends State<_ModeIconMenu> {
               ),
             ),
           ),
+        ),
         ),
       ),
     );
@@ -872,10 +858,10 @@ class _ModeIconMenuState extends State<_ModeIconMenu> {
             width: 32,
             height: 32,
             decoration: BoxDecoration(
-              color: _down ? const Color(0xFFDADAE0) : AppColors.keyCap,
+              color: _down ? const Color(0xFFDADAE0) : AppColors.keyCapOf(context),
               shape: BoxShape.circle,
             ),
-            child: Icon(icon, size: 16, color: AppColors.textPrimary),
+            child: Icon(icon, size: 16, color: AppColors.textPrimaryOf(context)),
           ),
         ),
       ),
@@ -914,26 +900,26 @@ class _MenuRowState extends State<_MenuRow> {
         margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         decoration: BoxDecoration(
-          color: _down ? AppColors.keyCap : Colors.transparent,
+          color: _down ? AppColors.keyCapOf(context) : Colors.transparent,
           borderRadius: BorderRadius.circular(12),
         ),
         child: Row(
           children: [
             if (widget.icon != null) ...[
-              Icon(widget.icon, size: 16, color: AppColors.textSecondary),
+              Icon(widget.icon, size: 16, color: AppColors.textSecondaryOf(context)),
               const SizedBox(width: 10),
             ],
             Expanded(
               child: Text(widget.label,
                   style: AppText.callout.copyWith(
-                    color: AppColors.textPrimary,
+                    color: AppColors.textPrimaryOf(context),
                     fontWeight: FontWeight.w600,
                   )),
             ),
             if (widget.selected)
-              const Padding(
-                padding: EdgeInsets.only(left: 10),
-                child: Icon(AppIcons.check, size: 16, color: AppColors.accent),
+              Padding(
+                padding: const EdgeInsets.only(left: 10),
+                child: Icon(AppIcons.check, size: 16, color: AppColors.accentOf(context)),
               ),
           ],
         ),
@@ -1051,14 +1037,16 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
           bottom: above ? (vh - off.dy + 6) : null,
           left: left,
           width: width,
-          child: Container(
-            clipBehavior: Clip.antiAlias,
-            decoration: BoxDecoration(
-              color: AppColors.surface,
+          child: HuxCard(
+            margin: EdgeInsets.zero,
+            padding: EdgeInsets.zero,
+            borderRadius: AppRadius.card,
+            backgroundColor: AppColors.surfaceOf(context),
+            borderColor: AppColors.hairlineOf(context),
+            elevation: 0,
+            child: ClipRRect(
               borderRadius: BorderRadius.circular(AppRadius.card),
-              boxShadow: AppShadows.popup,
-            ),
-            child: Column(
+              child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
                 _header(setOverlay),
@@ -1103,6 +1091,7 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
                 ),
               ],
             ),
+          ),
           ),
         );
       });
@@ -1167,19 +1156,19 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
     final showBack = _panel != 'home';
     return Container(
       padding: const EdgeInsets.fromLTRB(8, 6, 14, 6),
-      decoration: const BoxDecoration(
-        border: Border(bottom: BorderSide(color: AppColors.hairline)),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: AppColors.hairlineOf(context))),
       ),
       child: Row(
         children: [
           if (showBack)
             Pressable(
               onTap: () => _back(setOverlay),
-              child: const SizedBox(
+              child: SizedBox(
                 width: 28,
                 height: 28,
                 child: Icon(AppIcons.arrowLeft,
-                    size: 15, color: AppColors.textSecondary),
+                    size: 15, color: AppColors.textSecondaryOf(context)),
               ),
             )
           else
@@ -1272,7 +1261,7 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
               children: [
                 Text(title,
                     style: AppText.callout.copyWith(
-                      color: AppColors.textPrimary,
+                      color: AppColors.textPrimaryOf(context),
                       fontWeight: FontWeight.w600,
                     )),
                 if (value.isNotEmpty) ...[
@@ -1281,7 +1270,7 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
                     child: Text(value,
                         textAlign: TextAlign.left,
                         style: AppText.caption
-                            .copyWith(color: AppColors.textSecondary),
+                            .copyWith(color: AppColors.textSecondaryOf(context)),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis),
                   ),
@@ -1292,7 +1281,7 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
                   turns: expanded ? 0.5 : 0,
                   duration: const Duration(milliseconds: 200),
                   child: Icon(AppIcons.chevronDown,
-                      size: 14, color: AppColors.placeholder),
+                      size: 14, color: AppColors.placeholderOf(context)),
                 ),
               ],
             ),
@@ -1325,14 +1314,14 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
             Expanded(
               child: Text(label,
                   style: AppText.callout.copyWith(
-                    color: AppColors.textPrimary,
+                    color: AppColors.textPrimaryOf(context),
                     fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
                   ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis),
             ),
             if (selected)
-              const Icon(AppIcons.check, size: 15, color: AppColors.accent),
+              Icon(AppIcons.check, size: 15, color: AppColors.accentOf(context)),
           ],
         ),
       ),
@@ -1351,26 +1340,26 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
         duration: const Duration(milliseconds: 120),
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
         decoration: BoxDecoration(
-          color: _down ? const Color(0xFFDADAE0) : AppColors.keyCap,
+          color: _down ? const Color(0xFFDADAE0) : AppColors.keyCapOf(context),
           borderRadius: BorderRadius.circular(AppRadius.pill),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(AppIcons.modelChip,
-                size: 13, color: AppColors.textSecondary),
+            Icon(AppIcons.modelChip,
+                size: 13, color: AppColors.textSecondaryOf(context)),
             const SizedBox(width: 6),
             Flexible(
               child: Text(
                 _curModelLabel,
-                style: AppText.callout.copyWith(color: AppColors.textPrimary),
+                style: AppText.callout.copyWith(color: AppColors.textPrimaryOf(context)),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
             ),
             const SizedBox(width: 4),
             Icon(_open ? AppIcons.chevronUp : AppIcons.chevronDown,
-                size: 12, color: AppColors.textSecondary),
+                size: 12, color: AppColors.textSecondaryOf(context)),
           ],
         ),
       ),
@@ -1443,30 +1432,15 @@ class _SessionDrawerState extends State<_SessionDrawer> {
         children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
-            child: Pressable(
-              onTap: widget.onNew,
-              child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 26,
-                      height: 26,
-                      decoration: const BoxDecoration(
-                        color: AppColors.keyCap,
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Icon(AppIcons.plus,
-                          size: 15, color: AppColors.textSecondary),
-                    ),
-                    const SizedBox(width: 10),
-                    Text('新建会话',
-                        style: AppText.callout
-                            .copyWith(fontWeight: FontWeight.w600)),
-                  ],
-                ),
-              ),
+            child: HuxButton(
+              onPressed: widget.onNew,
+              variant: HuxButtonVariant.primary,
+              primaryColor: AppColors.textPrimaryOf(context),
+              textColor: AppColors.surfaceOf(context),
+              size: HuxButtonSize.medium,
+              width: HuxButtonWidth.expand,
+              icon: AppIcons.plus,
+              child: const Text('新建会话'),
             ),
           ),
           Padding(
@@ -1475,14 +1449,14 @@ class _SessionDrawerState extends State<_SessionDrawer> {
               padding:
                   const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
               decoration: BoxDecoration(
-                color: AppColors.surface,
+                color: AppColors.surfaceOf(context),
                 borderRadius: BorderRadius.circular(AppRadius.pill),
                 boxShadow: AppShadows.input,
               ),
               child: Row(
                 children: [
-                  const Icon(AppIcons.search,
-                      size: 15, color: AppColors.textSecondary),
+                  Icon(AppIcons.search,
+                      size: 15, color: AppColors.textSecondaryOf(context)),
                   const SizedBox(width: 8),
                   Expanded(
                     child: TextField(
@@ -1539,8 +1513,8 @@ class _SessionDrawerState extends State<_SessionDrawer> {
                   ),
           ),
           Container(
-            decoration: const BoxDecoration(
-              border: Border(top: BorderSide(color: AppColors.hairline)),
+            decoration: BoxDecoration(
+              border: Border(top: BorderSide(color: AppColors.hairlineOf(context))),
             ),
             child: Pressable(
               onTap: widget.onOpenSettings,
@@ -1549,8 +1523,8 @@ class _SessionDrawerState extends State<_SessionDrawer> {
                     const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                 child: Row(
                   children: [
-                    const Icon(AppIcons.settings,
-                        size: 18, color: AppColors.textSecondary),
+                    Icon(AppIcons.settings,
+                        size: 18, color: AppColors.textSecondaryOf(context)),
                     const SizedBox(width: 10),
                     Text('设置', style: AppText.callout),
                   ],
@@ -1575,10 +1549,10 @@ class _SessionDrawerState extends State<_SessionDrawer> {
             Icon(
                 collapsed ? AppIcons.chevronRight : AppIcons.chevronDown,
                 size: 14,
-                color: AppColors.textSecondary),
+                color: AppColors.textSecondaryOf(context)),
             const SizedBox(width: 4),
-            const Icon(AppIcons.folder,
-                size: 15, color: AppColors.textSecondary),
+            Icon(AppIcons.folder,
+                size: 15, color: AppColors.textSecondaryOf(context)),
             const SizedBox(width: 8),
             Expanded(
               child: Text(key,
@@ -1600,7 +1574,7 @@ class _SessionDrawerState extends State<_SessionDrawer> {
       child: Container(
         margin: const EdgeInsets.symmetric(vertical: 2),
         decoration: BoxDecoration(
-          color: sel ? AppColors.accentSoft : Colors.transparent,
+          color: sel ? AppColors.accentSoftOf(context) : Colors.transparent,
           borderRadius: BorderRadius.circular(AppRadius.thumbnail),
         ),
         child: IntrinsicHeight(
@@ -1611,7 +1585,7 @@ class _SessionDrawerState extends State<_SessionDrawer> {
                 width: 3,
                 margin: const EdgeInsets.symmetric(vertical: 6),
                 decoration: BoxDecoration(
-                  color: sel ? AppColors.accent : Colors.transparent,
+                  color: sel ? AppColors.accentOf(context) : Colors.transparent,
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
@@ -1621,7 +1595,7 @@ class _SessionDrawerState extends State<_SessionDrawer> {
                   child: Text(
                     m.title.isEmpty ? '（无标题）' : m.title,
                     style: AppText.callout.copyWith(
-                      color: AppColors.textPrimary,
+                      color: AppColors.textPrimaryOf(context),
                       fontWeight: sel ? FontWeight.w600 : FontWeight.w400,
                     ),
                     maxLines: 1,
@@ -1652,7 +1626,7 @@ class _AiIdentityBar extends StatelessWidget {
       child: Row(
         children: [
           KimiCoreIndicator(
-            size: 24,
+            size: 30,
             alignment: Alignment.centerLeft,
             animated: streaming,
           ),
@@ -1682,7 +1656,7 @@ class _EmptyState extends StatelessWidget {
           const SizedBox(height: AppSpacing.xl),
           Text(
             online ? '尽管问，Kimi 在听' : '连接中继后开始',
-            style: AppText.body.copyWith(color: AppColors.textSecondary),
+            style: AppText.body.copyWith(color: AppColors.textSecondaryOf(context)),
           ),
         ],
       ),
@@ -1751,15 +1725,15 @@ class _ScrollBottomFab extends StatelessWidget {
         width: 44,
         height: 44,
         decoration: BoxDecoration(
-          color: AppColors.surface,
+          color: AppColors.surfaceOf(context),
           shape: BoxShape.circle,
           boxShadow: AppShadows.popup,
         ),
         child: Stack(
           alignment: Alignment.center,
           children: [
-            const Icon(AppIcons.chevronDown,
-                size: 18, color: AppColors.textPrimary),
+            Icon(AppIcons.chevronDown,
+                size: 18, color: AppColors.textPrimaryOf(context)),
             if (newCount > 0)
               Positioned(
                 top: 2,
@@ -1768,7 +1742,7 @@ class _ScrollBottomFab extends StatelessWidget {
                   padding: const EdgeInsets.symmetric(
                       horizontal: 5, vertical: 1),
                   decoration: BoxDecoration(
-                    color: AppColors.accent,
+                    color: AppColors.accentOf(context),
                     borderRadius: BorderRadius.circular(AppRadius.pill),
                   ),
                   constraints: const BoxConstraints(minWidth: 16),
@@ -1776,7 +1750,7 @@ class _ScrollBottomFab extends StatelessWidget {
                     newCount > 99 ? '99+' : '$newCount',
                     textAlign: TextAlign.center,
                     style: AppText.monoCaption.copyWith(
-                        color: AppColors.surface, fontSize: 9),
+                        color: AppColors.surfaceOf(context), fontSize: 9),
                   ),
                 ),
               ),
@@ -1843,16 +1817,16 @@ class _BottomDock extends StatelessWidget {
       children: [
         Container(
           height: 24,
-          decoration: const BoxDecoration(
+          decoration: BoxDecoration(
             gradient: LinearGradient(
               begin: Alignment.topCenter,
               end: Alignment.bottomCenter,
-              colors: [Color(0x00F7F8FA), AppColors.background],
+              colors: [const Color(0x00F7F8FA), AppColors.backgroundOf(context)],
             ),
           ),
         ),
         Container(
-          color: AppColors.background,
+          color: AppColors.backgroundOf(context),
           padding: EdgeInsets.only(bottom: 12 + mq.padding.bottom),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -1880,13 +1854,13 @@ class _BottomDock extends StatelessWidget {
                       padding: const EdgeInsets.symmetric(
                           horizontal: 13, vertical: 8),
                       decoration: BoxDecoration(
-                        color: AppColors.keyCap,
+                        color: AppColors.keyCapOf(context),
                         borderRadius: BorderRadius.circular(AppRadius.pill),
                       ),
                       alignment: Alignment.center,
                       child: Text(_chips[i],
                           style: AppText.callout
-                              .copyWith(color: AppColors.textPrimary)),
+                              .copyWith(color: AppColors.textPrimaryOf(context))),
                     ),
                   ),
                 ),
@@ -1928,7 +1902,7 @@ class _SlashPanel extends StatelessWidget {
     return Container(
       constraints: const BoxConstraints(maxHeight: 180),
       decoration: BoxDecoration(
-        color: AppColors.surface,
+        color: AppColors.surfaceOf(context),
         borderRadius: BorderRadius.circular(AppRadius.thumbnail),
         boxShadow: AppShadows.popup,
       ),
@@ -1939,8 +1913,8 @@ class _SlashPanel extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(14, 4, 14, 6),
             child: Row(
               children: [
-                const Icon(AppIcons.command,
-                    size: 13, color: AppColors.textSecondary),
+                Icon(AppIcons.command,
+                    size: 13, color: AppColors.textSecondaryOf(context)),
                 const SizedBox(width: 6),
                 Text('快捷命令 · 选中后填入，可继续编辑',
                     style: AppText.monoCaption),
@@ -1984,30 +1958,20 @@ class _InputBar extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       decoration: BoxDecoration(
-        color: AppColors.surface,
+        color: AppColors.surfaceOf(context),
         borderRadius: BorderRadius.circular(AppRadius.card),
         boxShadow: AppShadows.input,
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          // §UX-10.2-1：视觉 32px，命中区域 44×44。
-          Pressable(
-            onTap: onOpenPlus,
-            child: SizedBox(
-              width: 44,
-              height: 44,
-              child: Center(
-                child: Container(
-                  width: 32,
-                  height: 32,
-                  decoration: const BoxDecoration(
-                      color: AppColors.keyCap, shape: BoxShape.circle),
-                  child:
-                      const Icon(AppIcons.plus, size: 18, color: AppColors.textSecondary),
-                ),
-              ),
-            ),
+          // §UX-10.2-1：与发送/停止统一为 hux 图标按钮（32×32），消除与原输入框的视觉割裂。
+          HuxButton(
+            onPressed: onOpenPlus,
+            variant: HuxButtonVariant.ghost,
+            size: HuxButtonSize.small,
+            icon: AppIcons.plus,
+            child: const SizedBox(width: 0),
           ),
           const SizedBox(width: AppSpacing.sm),
           Expanded(
@@ -2038,52 +2002,24 @@ class _InputBar extends StatelessWidget {
           const SizedBox(width: AppSpacing.sm),
           // §13「停」可见性随状态：流式中亮且显眼（占发送位），空闲时是发送。
           running
-              ? PulseWrapper(
-                  active: running,
-                  child: Pressable(
-                    onTap: onStop,
-                    // §UX-10.2-1：视觉 32px，命中区域 44×44。
-                    child: SizedBox(
-                      width: 44,
-                      height: 44,
-                      child: Center(
-                        child: Container(
-                          width: 32,
-                          height: 32,
-                          decoration: const BoxDecoration(
-                            color: AppColors.reject,
-                            shape: BoxShape.circle,
-                          ),
-                          child: const Icon(AppIcons.stop,
-                              size: 14, color: AppColors.surface),
-                        ),
-                      ),
-                    ),
-                  ),
+              ? HuxButton(
+                  onPressed: onStop,
+                  variant: HuxButtonVariant.primary,
+                  primaryColor: AppColors.reject,
+                  textColor: AppColors.surfaceOf(context),
+                  size: HuxButtonSize.small,
+                  icon: AppIcons.stop,
+                  child: const SizedBox(width: 0),
                 )
-              : Pressable(
-                  onTap: enabled ? () => onSend(controller.text) : () {},
-                  // §UX-10.2-1：视觉 32px，命中区域 44×44。
-                  child: SizedBox(
-                    width: 44,
-                    height: 44,
-                    child: Center(
-                      child: Container(
-                        width: 32,
-                        height: 32,
-                        decoration: BoxDecoration(
-                          color:
-                              enabled ? AppColors.textPrimary : AppColors.keyCap,
-                          shape: BoxShape.circle,
-                        ),
-                        child: Icon(AppIcons.send,
-                            size: 16,
-                            color: enabled
-                                ? AppColors.surface
-                                : AppColors.placeholder),
-                      ),
-                    ),
-                  ),
+              : HuxButton(
+                  onPressed: enabled ? () => onSend(controller.text) : null,
+                  variant: HuxButtonVariant.primary,
+                  primaryColor: AppColors.textPrimaryOf(context),
+                  textColor: AppColors.surfaceOf(context),
+                  size: HuxButtonSize.small,
+                  isDisabled: !enabled,
+                  icon: AppIcons.send,
+                  child: const SizedBox(width: 0),
                 ),
         ],
       ),
@@ -2157,7 +2093,7 @@ class _PermSheetState extends State<_PermSheet>
   Widget build(BuildContext context) {
     final p = widget.perm;
     final critical = isCriticalCommand(p.command);
-    final barColor = critical ? AppColors.reject : AppColors.textSecondary;
+    final barColor = critical ? AppColors.reject : AppColors.textSecondaryOf(context);
     final out = _remaining == Duration.zero;
 
     // §UX-6.2-1 入场：translateY 24→0 + fade，220ms easeOut。
@@ -2171,12 +2107,11 @@ class _PermSheetState extends State<_PermSheet>
   }
 
   Widget _card(PermissionRequest p, bool critical, Color barColor, bool out) {
-    return Container(
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(AppRadius.card),
-        boxShadow: AppShadows.card,
-      ),
+    return HuxCard(
+      margin: EdgeInsets.zero,
+      padding: EdgeInsets.zero,
+      borderRadius: AppRadius.card,
+      backgroundColor: AppColors.surfaceOf(context),
       child: IntrinsicHeight(
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2272,7 +2207,7 @@ class _PermSheetState extends State<_PermSheet>
         width: double.infinity,
         padding: const EdgeInsets.all(AppSpacing.md),
         decoration: BoxDecoration(
-          color: AppColors.background,
+          color: AppColors.backgroundOf(context),
           borderRadius: BorderRadius.circular(AppRadius.thumbnail),
         ),
         child: Row(
@@ -2290,7 +2225,7 @@ class _PermSheetState extends State<_PermSheet>
             Icon(
               _expanded ? AppIcons.chevronDown : AppIcons.chevronRight,
               size: 14,
-              color: AppColors.textSecondary,
+              color: AppColors.textSecondaryOf(context),
             ),
           ],
         ),
@@ -2344,27 +2279,24 @@ class _PermSheetState extends State<_PermSheet>
   }
 
   Widget _permBtn(PermOption opt, {bool disabled = false}) {
-    final (bg, fg, label) = switch (opt.kind) {
-      'allow_once' => (AppColors.approve, AppColors.surface, '批准'),
-      'allow_always' => (AppColors.keyCap, AppColors.textPrimary, '本会话'),
-      'reject_once' => (AppColors.rejectSoft, AppColors.reject, '拒绝'),
-      _ => (AppColors.keyCap, AppColors.textPrimary, opt.name ?? opt.optionId),
+    final (primaryColor, variant, label, lightText) = switch (opt.kind) {
+      'allow_once' =>
+        (AppColors.approve, HuxButtonVariant.primary, '批准', true),
+      'allow_always' =>
+        (null, HuxButtonVariant.secondary, '本会话', false),
+      'reject_once' => (AppColors.reject, HuxButtonVariant.primary, '拒绝', true),
+      _ => (null, HuxButtonVariant.secondary, opt.name ?? opt.optionId, false),
     };
-    return Pressable(
-      onTap: disabled ? () {} : () => widget.onDecide(opt),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.symmetric(vertical: 10),
-        decoration: BoxDecoration(
-          color: disabled ? AppColors.keyCap : bg,
-          borderRadius: BorderRadius.circular(AppRadius.pill),
-        ),
-        alignment: Alignment.center,
-        child: Text(label,
-            style: AppText.callout.copyWith(
-                color: disabled ? AppColors.placeholder : fg,
-                fontWeight: FontWeight.w600)),
-      ),
+    return HuxButton(
+      onPressed: disabled ? null : () => widget.onDecide(opt),
+      variant: variant,
+      primaryColor: primaryColor,
+      textColor: lightText ? AppColors.surfaceOf(context) : null,
+      size: HuxButtonSize.medium,
+      width: HuxButtonWidth.expand,
+      isDisabled: disabled,
+      child: Text(label,
+          style: AppText.callout.copyWith(fontWeight: FontWeight.w600)),
     );
   }
 }
@@ -2436,8 +2368,8 @@ class _SettingsSheetState extends State<_SettingsSheet> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text('配置已保存并应用',
-            style: AppText.callout.copyWith(color: AppColors.surface)),
-        backgroundColor: AppColors.textPrimary,
+            style: AppText.callout.copyWith(color: AppColors.surfaceOf(context))),
+        backgroundColor: AppColors.textPrimaryOf(context),
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         duration: const Duration(milliseconds: 1600),
@@ -2472,7 +2404,7 @@ class _SettingsSheetState extends State<_SettingsSheet> {
               height: 4,
               margin: const EdgeInsets.only(bottom: 8),
               decoration: BoxDecoration(
-                color: AppColors.keyCap,
+                color: AppColors.keyCapOf(context),
                 borderRadius: BorderRadius.circular(2),
               ),
             ),
@@ -2481,17 +2413,17 @@ class _SettingsSheetState extends State<_SettingsSheet> {
             padding: const EdgeInsets.fromLTRB(20, 4, 12, 8),
             child: Row(
               children: [
-                const Icon(AppIcons.settings,
-                    size: 18, color: AppColors.textPrimary),
+                Icon(AppIcons.settings,
+                    size: 18, color: AppColors.textPrimaryOf(context)),
                 const SizedBox(width: 8),
                 const Expanded(child: Text('设置', style: AppText.title1)),
                 Pressable(
                   onTap: () => Navigator.of(context).pop(),
-                  child: const SizedBox(
+                  child: SizedBox(
                     width: 32,
                     height: 32,
                     child: Icon(AppIcons.close,
-                        size: 18, color: AppColors.textSecondary),
+                        size: 18, color: AppColors.textSecondaryOf(context)),
                   ),
                 ),
               ],
@@ -2512,7 +2444,7 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                   padding: const EdgeInsets.symmetric(
                       horizontal: 12, vertical: 4),
                   decoration: BoxDecoration(
-                    color: AppColors.background,
+                    color: AppColors.backgroundOf(context),
                     borderRadius: BorderRadius.circular(AppRadius.thumbnail),
                   ),
                   child: TextField(
@@ -2534,12 +2466,12 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                       padding: const EdgeInsets.symmetric(
                           horizontal: 16, vertical: 9),
                       decoration: BoxDecoration(
-                        color: AppColors.textPrimary,
+                        color: AppColors.textPrimaryOf(context),
                         borderRadius: BorderRadius.circular(AppRadius.pill),
                       ),
                       child: Text('保存并重连',
                           style: AppText.callout.copyWith(
-                              color: AppColors.surface,
+                              color: AppColors.surfaceOf(context),
                               fontWeight: FontWeight.w600)),
                     ),
                   ),
@@ -2556,7 +2488,7 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                   padding:
                       const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                   decoration: BoxDecoration(
-                    color: AppColors.background,
+                    color: AppColors.backgroundOf(context),
                     borderRadius: BorderRadius.circular(AppRadius.thumbnail),
                   ),
                   child: TextField(
@@ -2585,7 +2517,7 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                   padding:
                       const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                   decoration: BoxDecoration(
-                    color: AppColors.background,
+                    color: AppColors.backgroundOf(context),
                     borderRadius: BorderRadius.circular(AppRadius.thumbnail),
                   ),
                   child: TextField(
@@ -2611,12 +2543,12 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                       padding: const EdgeInsets.symmetric(
                           horizontal: 16, vertical: 9),
                       decoration: BoxDecoration(
-                        color: AppColors.textPrimary,
+                        color: AppColors.textPrimaryOf(context),
                         borderRadius: BorderRadius.circular(AppRadius.pill),
                       ),
                       child: Text('保存并应用',
                           style: AppText.callout.copyWith(
-                              color: AppColors.surface,
+                              color: AppColors.surfaceOf(context),
                               fontWeight: FontWeight.w600)),
                     ),
                   ),
@@ -2671,7 +2603,7 @@ class _SettingsSheetState extends State<_SettingsSheet> {
             Expanded(child: Text(k, style: AppText.callout)),
             Switch(
               value: v,
-              activeThumbColor: AppColors.accent,
+              activeThumbColor: AppColors.accentOf(context),
               onChanged: onChanged,
             ),
           ],
@@ -2728,21 +2660,21 @@ class _ConnBanner extends StatelessWidget {
     final never = lastSyncedAt == null;
     final (color, icon, text) = switch (state) {
       'connecting' => never
-          ? (AppColors.textSecondary, AppIcons.history, '连接中…')
+          ? (AppColors.textSecondaryOf(context), AppIcons.history, '连接中…')
           : (AppColors.warning, AppIcons.history, '重连中…'),
       'degraded' =>
           (AppColors.warning, AppIcons.modeManual, 'Kimi 未响应 · 可重试拉起'),
       'offline' => never
-          ? (AppColors.textSecondary, AppIcons.history, '连接中…')
-          : (AppColors.placeholder, AppIcons.close, '已断开 · 最后同步于 ${_hm(lastSyncedAt)}'),
-      _ => (AppColors.textSecondary, AppIcons.history, ''),
+          ? (AppColors.textSecondaryOf(context), AppIcons.history, '连接中…')
+          : (AppColors.placeholderOf(context), AppIcons.close, '已断开 · 最后同步于 ${_hm(lastSyncedAt)}'),
+      _ => (AppColors.textSecondaryOf(context), AppIcons.history, ''),
     };
 
     return Container(
       margin: const EdgeInsets.fromLTRB(AppSpacing.pageMargin, 0, AppSpacing.pageMargin, 6),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
-        color: AppColors.surface,
+        color: AppColors.surfaceOf(context),
         borderRadius: BorderRadius.circular(AppRadius.thumbnail),
         boxShadow: AppShadows.input,
       ),
@@ -2776,7 +2708,7 @@ class _ConnBanner extends StatelessWidget {
                 ),
                 child: Text('重试',
                     style: AppText.callout.copyWith(
-                        color: AppColors.surface,
+                        color: AppColors.surfaceOf(context),
                         fontWeight: FontWeight.w600)),
               ),
             ),
@@ -2880,7 +2812,7 @@ class _SessionTab extends StatelessWidget {
         height: 44, // §UX-10.2-1：触控目标高度合规
         padding: const EdgeInsets.only(left: 12),
         decoration: BoxDecoration(
-          color: selected ? AppColors.accentSoft : AppColors.keyCap,
+          color: selected ? AppColors.accentSoftOf(context) : AppColors.keyCapOf(context),
           borderRadius: BorderRadius.circular(AppRadius.pill),
         ),
         child: Row(
@@ -2900,7 +2832,7 @@ class _SessionTab extends StatelessWidget {
               child: Text(
                 title,
                 style: AppText.callout.copyWith(
-                  color: AppColors.textPrimary,
+                  color: AppColors.textPrimaryOf(context),
                   fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
                 ),
                 maxLines: 1,
@@ -2914,7 +2846,7 @@ class _SessionTab extends StatelessWidget {
                 width: 44,
                 height: 44,
                 child: Center(
-                  child: Icon(AppIcons.close, size: 13, color: AppColors.textSecondary),
+                  child: Icon(AppIcons.close, size: 13, color: AppColors.textSecondaryOf(context)),
                 ),
               ),
             ),
@@ -2945,11 +2877,11 @@ class _PendingBadge extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(AppIcons.bell, size: 14, color: AppColors.surface),
+            Icon(AppIcons.bell, size: 14, color: AppColors.surfaceOf(context)),
             const SizedBox(width: 6),
             Text('$count',
                 style: AppText.callout.copyWith(
-                    color: AppColors.surface, fontWeight: FontWeight.w700)),
+                    color: AppColors.surfaceOf(context), fontWeight: FontWeight.w700)),
           ],
         ),
       ),
@@ -3002,7 +2934,7 @@ class _PendingQueuePageState extends State<_PendingQueuePage> {
     final groups = all.entries.where((e) => e.value.isNotEmpty).toList();
 
     return Scaffold(
-      backgroundColor: AppColors.background,
+      backgroundColor: AppColors.backgroundOf(context),
       body: SafeArea(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -3030,7 +2962,7 @@ class _PendingQueuePageState extends State<_PendingQueuePage> {
                           const SizedBox(height: AppSpacing.xl),
                           Text('没有等待你的批准',
                               style: AppText.body
-                                  .copyWith(color: AppColors.textSecondary)),
+                                  .copyWith(color: AppColors.textSecondaryOf(context))),
                         ],
                       ),
                     )
@@ -3044,8 +2976,8 @@ class _PendingQueuePageState extends State<_PendingQueuePage> {
                                 const EdgeInsets.fromLTRB(4, 12, 4, 8),
                             child: Row(
                               children: [
-                                const Icon(AppIcons.folder,
-                                    size: 14, color: AppColors.textSecondary),
+                                Icon(AppIcons.folder,
+                                    size: 14, color: AppColors.textSecondaryOf(context)),
                                 const SizedBox(width: 6),
                                 Expanded(
                                   child: Text(widget.store.titleOf(g.key),
@@ -3059,7 +2991,7 @@ class _PendingQueuePageState extends State<_PendingQueuePage> {
                                       widget.onPickSession(g.key),
                                   child: Text('切到该会话',
                                       style: AppText.caption.copyWith(
-                                          color: AppColors.accent)),
+                                          color: AppColors.accentOf(context))),
                                 ),
                               ],
                             ),
@@ -3083,14 +3015,12 @@ class _PendingQueuePageState extends State<_PendingQueuePage> {
   }
 
   Widget _iconBtn(IconData icon, {VoidCallback? onTap}) {
-    return Pressable(
-      onTap: onTap ?? () {},
-      // §UX-10.2-1：命中区域 44×44。
-      child: SizedBox(
-        width: 44,
-        height: 44,
-        child: Icon(icon, size: 20, color: AppColors.textPrimary),
-      ),
+    return HuxButton(
+      onPressed: onTap ?? () {},
+      variant: HuxButtonVariant.ghost,
+      size: HuxButtonSize.small,
+      icon: icon,
+      child: const SizedBox(width: 0),
     );
   }
 }

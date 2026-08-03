@@ -7,6 +7,8 @@ abstract final class AppIcons {
   static const IconData menu = LucideIcons.menu;
   static const IconData settings = LucideIcons.settings;
   static const IconData bell = LucideIcons.bell;
+  static const IconData sun = LucideIcons.sun; // 切到浅色
+  static const IconData moon = LucideIcons.moon; // 切到暗色
   static const IconData plus = LucideIcons.plus;
   static const IconData close = LucideIcons.x;
   static const IconData history = LucideIcons.history;

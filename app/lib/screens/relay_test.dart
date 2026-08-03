@@ -99,7 +99,7 @@ class _RelayTestPageState extends State<RelayTestPage> {
     final blocks = _store.blocksOf(_store.currentSid);
     final perm = _store.pendingOf(_store.currentSid);
     return Scaffold(
-      backgroundColor: AppColors.background,
+      backgroundColor: AppColors.backgroundOf(context),
       body: SafeArea(
         child: Column(
           children: [
@@ -128,12 +128,12 @@ class _RelayTestPageState extends State<RelayTestPage> {
     final dot = switch (_store.relayState) {
       'ok' => AppColors.approve,
       'degraded' => AppColors.warning,
-      _ => AppColors.placeholder,
+      _ => AppColors.placeholderOf(context),
     };
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-      decoration: const BoxDecoration(
-        border: Border(bottom: BorderSide(color: AppColors.hairline)),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: AppColors.hairlineOf(context))),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -167,7 +167,7 @@ class _RelayTestPageState extends State<RelayTestPage> {
                   padding: const EdgeInsets.symmetric(
                       horizontal: 12, vertical: 8),
                   decoration: BoxDecoration(
-                    color: AppColors.surface,
+                    color: AppColors.surfaceOf(context),
                     borderRadius: BorderRadius.circular(AppRadius.pill),
                     boxShadow: AppShadows.input,
                   ),
@@ -188,12 +188,12 @@ class _RelayTestPageState extends State<RelayTestPage> {
                   padding: const EdgeInsets.symmetric(
                       horizontal: 16, vertical: 9),
                   decoration: BoxDecoration(
-                    color: AppColors.textPrimary,
+                    color: AppColors.textPrimaryOf(context),
                     borderRadius: BorderRadius.circular(AppRadius.pill),
                   ),
                   child: Text('连接',
                       style: AppText.callout.copyWith(
-                          color: AppColors.surface,
+                          color: AppColors.surfaceOf(context),
                           fontWeight: FontWeight.w600)),
                 ),
               ),
@@ -218,7 +218,7 @@ class _RelayTestPageState extends State<RelayTestPage> {
       margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
       padding: const EdgeInsets.all(AppSpacing.lg),
       decoration: BoxDecoration(
-        color: AppColors.surface,
+        color: AppColors.surfaceOf(context),
         borderRadius: BorderRadius.circular(AppRadius.card),
         boxShadow: AppShadows.card,
         border: Border.all(color: AppColors.warning, width: 1),
@@ -250,7 +250,7 @@ class _RelayTestPageState extends State<RelayTestPage> {
               width: double.infinity,
               padding: const EdgeInsets.all(AppSpacing.md),
               decoration: BoxDecoration(
-                color: AppColors.background,
+                color: AppColors.backgroundOf(context),
                 borderRadius: BorderRadius.circular(AppRadius.thumbnail),
               ),
               child: Text(p.command, style: AppText.mono),
@@ -272,10 +272,10 @@ class _RelayTestPageState extends State<RelayTestPage> {
 
   Widget _permButton(PermOption opt) {
     final (bg, fg, label) = switch (opt.kind) {
-      'allow_once' => (AppColors.approve, AppColors.surface, '批准'),
-      'allow_always' => (AppColors.keyCap, AppColors.textPrimary, '本会话'),
+      'allow_once' => (AppColors.approve, AppColors.surfaceOf(context), '批准'),
+      'allow_always' => (AppColors.keyCapOf(context), AppColors.textPrimaryOf(context), '本会话'),
       'reject_once' => (AppColors.rejectSoft, AppColors.reject, '拒绝'),
-      _ => (AppColors.keyCap, AppColors.textPrimary, opt.name ?? opt.optionId),
+      _ => (AppColors.keyCapOf(context), AppColors.textPrimaryOf(context), opt.name ?? opt.optionId),
     };
     return GestureDetector(
       onTap: () => _decide(opt),
@@ -300,7 +300,7 @@ class _RelayTestPageState extends State<RelayTestPage> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         decoration: BoxDecoration(
-          color: AppColors.surface,
+          color: AppColors.surfaceOf(context),
           borderRadius: BorderRadius.circular(AppRadius.card),
           boxShadow: AppShadows.input,
         ),
@@ -329,13 +329,13 @@ class _RelayTestPageState extends State<RelayTestPage> {
                 height: 32,
                 decoration: BoxDecoration(
                   color: enabled
-                      ? AppColors.textPrimary
-                      : AppColors.keyCap,
+                      ? AppColors.textPrimaryOf(context)
+                      : AppColors.keyCapOf(context),
                   shape: BoxShape.circle,
                 ),
                 child: Icon(AppIcons.send,
                     size: 16,
-                    color: enabled ? AppColors.surface : AppColors.placeholder),
+                    color: enabled ? AppColors.surfaceOf(context) : AppColors.placeholderOf(context)),
               ),
             ),
           ],

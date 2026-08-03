@@ -1,202 +1,152 @@
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:hux/hux.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:markdown/markdown.dart' as md;
 import 'package:url_launcher/url_launcher.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
 import '../theme/app_dimens.dart';
 import '../widgets/common.dart';
+import 'code_highlighter.dart';
 
-/// 列表项（marker 如 "1." 或 "•"，text 为内容）。
-typedef _ListItem = ({String marker, String text});
-
-/// 轻量 Markdown 渲染：AI 输出按 Markdown 语义渲染。
-/// 支持：标题(#..)、加粗/斜体、行内码、代码块(```)、无序/有序列表、
-/// 链接、引用(>)、分割线(---)。不引第三方包（自托管、零网络依赖），
-/// 样式用 SENTINEL 令牌，代码块用等宽 + 浅底，贴合整体气质。
+/// 活的流 Markdown 渲染：用 flutter_markdown（GFM 标准解析）替代自研渲染器，
+/// 代码块通过 `builders['pre']` 接管为深色语法高亮 + 保留复制按钮。
+/// 链接点击跳外链（失败回退复制），样式统一接 SENTINEL 令牌。
 class MarkdownView extends StatelessWidget {
   final String data;
   const MarkdownView({super.key, required this.data});
 
   @override
   Widget build(BuildContext context) {
-    final blocks = _parseBlocks(data, context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        for (var i = 0; i < blocks.length; i++)
-          Padding(
-            padding: EdgeInsets.only(bottom: i == blocks.length - 1 ? 0 : 8),
-            child: blocks[i],
-          ),
-      ],
+    return MarkdownBody(
+      data: data,
+      selectable: true,
+      softLineBreak: true,
+      styleSheet: _styleSheet(context),
+      onTapLink: (text, href, title) {
+        _openLink(context, href);
+      },
+      builders: <String, MarkdownElementBuilder>{
+        'pre': _CodeBlockBuilder(),
+      },
     );
   }
 
-  // ---------- 块级解析 ----------
-
-  List<Widget> _parseBlocks(String src, BuildContext ctx) {
-    final lines = src.split('\n');
-    final out = <Widget>[];
-    var i = 0;
-    final paraBuf = StringBuffer();
-    void flushPara() {
-      final t = paraBuf.toString().trimRight();
-      if (t.trim().isNotEmpty) out.add(_paragraph(t));
-      paraBuf.clear();
+  Future<void> _openLink(BuildContext context, String? href) async {
+    if (href == null) return;
+    final uri = Uri.tryParse(href);
+    if (uri == null) {
+      copyToClipboard(context, href); // 同步路径：uri 非法直接复制
+      return;
     }
-
-    while (i < lines.length) {
-      final line = lines[i];
-      final trimmed = line.trimRight();
-
-      // 代码块 ```
-      if (trimmed.trimLeft().startsWith('```')) {
-        flushPara();
-        final lang = trimmed.trimLeft().substring(3).trim();
-        final codeBuf = StringBuffer();
-        i++;
-        while (i < lines.length && !lines[i].trimRight().trimLeft().startsWith('```')) {
-          codeBuf.writeln(lines[i]);
-          i++;
-        }
-        i++; // 跳过收尾 ```
-        out.add(_codeBlock(codeBuf.toString().trimRight(), lang, ctx));
-        continue;
-      }
-
-      // 空行 → 段落分隔
-      if (trimmed.isEmpty) {
-        flushPara();
-        i++;
-        continue;
-      }
-
-      // 分割线 ---
-      if (RegExp(r'^\s*(-{3,}|\*{3,})\s*$').hasMatch(trimmed)) {
-        flushPara();
-        out.add(Container(height: 1, color: AppColors.hairline));
-        i++;
-        continue;
-      }
-
-      // 标题
-      final h = RegExp(r'^(#{1,6})\s+(.*)$').firstMatch(trimmed);
-      if (h != null) {
-        flushPara();
-        out.add(_heading(h.group(1)!.length, h.group(2)!));
-        i++;
-        continue;
-      }
-
-      // 引用
-      if (trimmed.trimLeft().startsWith('>')) {
-        flushPara();
-        final qBuf = StringBuffer();
-        while (i < lines.length && lines[i].trimRight().trimLeft().startsWith('>')) {
-          qBuf.writeln(lines[i].trimRight().trimLeft().substring(1).trimLeft());
-          i++;
-        }
-        out.add(_quote(qBuf.toString().trimRight()));
-        continue;
-      }
-
-      // 列表（无序 -/*/+ 或有序 1.）
-      final lm = RegExp(r'^\s*(([-*+])|(\d+\.))\s+(.*)$').firstMatch(trimmed);
-      if (lm != null) {
-        flushPara();
-        final items = <_ListItem>[];
-        var ordered = false;
-        while (i < lines.length) {
-          // 组号：1=整个标记，2=无序(-/*/+)，3=有序(1.)，4=内容。
-          final m2 = RegExp(r'^\s*(([-*+])|(\d+\.))\s+(.*)$')
-              .firstMatch(lines[i].trimRight());
-          if (m2 == null) break;
-          final isNum = m2.group(3) != null;
-          if (items.isEmpty) ordered = isNum;
-          items.add((marker: m2.group(3) ?? '•', text: m2.group(4)!));
-          i++;
-        }
-        out.add(_list(items, ordered));
-        continue;
-      }
-
-      // 普通文本行 → 累积进段落
-      paraBuf.writeln(line);
-      i++;
+    // 失败回退：await 前捕获 messenger 并构建 snackbar，避免跨 async 使用 context。
+    final messenger = ScaffoldMessenger.of(context);
+    final fallback = HuxSnackbar(
+      message: '链接已复制',
+      variant: HuxSnackbarVariant.success,
+      duration: const Duration(milliseconds: 1400),
+    ).build(context);
+    final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!ok) {
+      Clipboard.setData(ClipboardData(text: href));
+      HapticFeedback.selectionClick();
+      messenger.showSnackBar(fallback);
     }
-    flushPara();
-    return out;
   }
+}
 
-  // ---------- 块级渲染 ----------
+/// 基于 SENTINEL 令牌的 Markdown 样式表（对齐原自研渲染器的视觉）。
+MarkdownStyleSheet _styleSheet(BuildContext context) {
+  final base = MarkdownStyleSheet.fromTheme(Theme.of(context));
+  return base.copyWith(
+    p: AppText.body.copyWith(height: 1.6),
+    h1: AppText.body.copyWith(
+        fontSize: 19, fontWeight: FontWeight.w700, height: 1.35),
+    h2: AppText.body.copyWith(
+        fontSize: 17.5, fontWeight: FontWeight.w700, height: 1.35),
+    h3: AppText.body.copyWith(
+        fontSize: 16, fontWeight: FontWeight.w700, height: 1.35),
+    h4: AppText.body.copyWith(
+        fontSize: 15, fontWeight: FontWeight.w700, height: 1.35),
+    h5: AppText.body.copyWith(
+        fontSize: 15, fontWeight: FontWeight.w700, height: 1.35),
+    h6: AppText.body.copyWith(
+        fontSize: 15, fontWeight: FontWeight.w700, height: 1.35),
+    em: AppText.body.copyWith(fontStyle: FontStyle.italic),
+    strong: AppText.body.copyWith(fontWeight: FontWeight.w700),
+    blockquote: AppText.callout.copyWith(
+        color: AppColors.textSecondaryOf(context), fontStyle: FontStyle.italic),
+    blockquoteDecoration: BoxDecoration(
+      border: Border(left: BorderSide(color: AppColors.placeholderOf(context), width: 3)),
+    ),
+    blockquotePadding: const EdgeInsets.only(left: 10),
+    listBullet: AppText.body.copyWith(color: AppColors.textSecondaryOf(context)),
+    // 行内码：等宽 + 浅灰底（无圆角，受 TextStyle 限制）。
+    code: AppText.mono.copyWith(fontSize: 12, backgroundColor: AppColors.keyCapOf(context)),
+    a: TextStyle(
+        color: AppColors.accentOf(context), decoration: TextDecoration.underline),
+    horizontalRuleDecoration: BoxDecoration(
+      border: Border(top: BorderSide(color: AppColors.hairlineOf(context))),
+    ),
+    blockSpacing: 8,
+    listIndent: 22,
+  );
+}
 
-  Widget _paragraph(String text) {
-    return _InlineText(text, style: AppText.body);
+/// 接管 `pre` 块：渲染为深色代码块 + 语法高亮 + 复制按钮。
+class _CodeBlockBuilder extends MarkdownElementBuilder {
+  _CodeBlockBuilder();
+
+  @override
+  bool isBlockElement() => true;
+
+  /// flutter_markdown 在遍历 `pre > code > Text` 时仍会为 `code` 压入 inline。
+  /// 自定义 `pre` builder 若沿用默认的 visitText（返回 null），该 inline 没有
+  /// child，内部无法 flush，构建结束便触发 `_inlines.isEmpty` 断言。
+  /// 返回不可见占位只用于让包内部正确清栈；最终代码块仍完全由下方
+  /// visitElementAfterWithContext 返回的 _CodeBlockView 接管，不会重复渲染。
+  @override
+  Widget? visitText(md.Text text, TextStyle? preferredStyle) =>
+      const SizedBox.shrink();
+
+  @override
+  Widget? visitElementAfterWithContext(
+    BuildContext context,
+    md.Element element,
+    TextStyle? preferredStyle,
+    TextStyle? parentStyle,
+  ) {
+    final raw =
+        element.textContent.replaceAll(RegExp(r'^\n+|\n+\s*$'), '');
+    var lang = '';
+    for (final child in element.children ?? const <md.Element>[]) {
+      if (child is md.Element && child.tag == 'code') {
+        final cls = child.attributes['class'] ?? '';
+        final m = RegExp(r'language-([\w+-]+)').firstMatch(cls);
+        if (m != null) lang = m.group(1)!;
+        break;
+      }
+    }
+    final span = highlightCode(raw, lang, Theme.of(context).brightness);
+    return _CodeBlockView(code: raw, lang: lang, span: span);
   }
+}
 
-  Widget _heading(int level, String text) {
-    final size = switch (level) {
-      1 => 19.0,
-      2 => 17.5,
-      3 => 16.0,
-      _ => 15.0,
-    };
-    return Padding(
-      padding: const EdgeInsets.only(top: 4),
-      child: _InlineText(
-        text,
-        style: AppText.body.copyWith(
-            fontSize: size, fontWeight: FontWeight.w700, height: 1.35),
-      ),
-    );
-  }
+/// 深色代码块视图：语言标签 + 复制按钮（保留）+ 横向可滚的高亮代码。
+class _CodeBlockView extends StatelessWidget {
+  final String code;
+  final String lang;
+  final TextSpan span;
+  const _CodeBlockView(
+      {required this.code, required this.lang, required this.span});
 
-  Widget _quote(String text) {
-    return Container(
-      decoration: const BoxDecoration(
-        border: Border(left: BorderSide(color: AppColors.placeholder, width: 3)),
-      ),
-      padding: const EdgeInsets.only(left: 10),
-      child: _InlineText(
-        text,
-        style: AppText.callout.copyWith(
-            color: AppColors.textSecondary, fontStyle: FontStyle.italic),
-      ),
-    );
-  }
-
-  Widget _list(List<_ListItem> items, bool ordered) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        for (var i = 0; i < items.length; i++)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 4),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                SizedBox(
-                  width: ordered ? 22 : 14,
-                  child: Text(
-                    ordered ? '${i + 1}.' : '•',
-                    style: AppText.body.copyWith(color: AppColors.textSecondary),
-                  ),
-                ),
-                Expanded(child: _InlineText(items[i].text, style: AppText.body)),
-              ],
-            ),
-          ),
-      ],
-    );
-  }
-
-  Widget _codeBlock(String code, String lang, BuildContext ctx) {
+  @override
+  Widget build(BuildContext context) {
     return Container(
       width: double.infinity,
       decoration: BoxDecoration(
-        color: AppColors.textPrimary, // 深色代码块，命令/代码用合适的方式呈现
+        color: const Color(0xFF1D1D1F), // 深底（同原自研，明暗均固定深色）
         borderRadius: BorderRadius.circular(AppRadius.thumbnail),
       ),
       child: Column(
@@ -211,21 +161,20 @@ class MarkdownView extends StatelessWidget {
                   child: Padding(
                     padding: const EdgeInsets.fromLTRB(12, 8, 4, 0),
                     child: Text(lang,
-                        style: AppText.monoCaption.copyWith(
-                            color: const Color(0xFF8E8E93))),
+                        style: AppText.monoCaption
+                            .copyWith(color: const Color(0xFF8E8E93))),
                   ),
                 )
               else
                 const Spacer(),
-              // §UX-2.2：代码块保留复制按钮（高频操作），深色块内用幽灵样式。
               CopyButton(text: code, dark: true),
             ],
           ),
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.all(12),
-            child: SelectableText(
-              code,
+            child: SelectableText.rich(
+              span,
               style: AppText.mono.copyWith(
                   color: const Color(0xFFECECEF), height: 1.5),
             ),
@@ -233,103 +182,5 @@ class MarkdownView extends StatelessWidget {
         ],
       ),
     );
-  }
-
-}
-
-/// 行内 Markdown：解析 **bold**、*italic*、`code`、[text](url)。
-class _InlineText extends StatelessWidget {
-  final String text;
-  final TextStyle style;
-  const _InlineText(this.text, {required this.style});
-
-  static final _re = RegExp(
-      r'(\*\*\*.+?\*\*\*|\*\*.+?\*\*|___.+?___|__.+?__|(?<!\*)\*[^*\n]+?\*(?!\*)|(?<!_)_[^_\n]+?_(?!_)|`[^`\n]+`|\[[^\]\n]+\]\([^)\n]+\))');
-
-  @override
-  Widget build(BuildContext context) {
-    final spans = <InlineSpan>[];
-    var last = 0;
-    for (final m in _re.allMatches(text)) {
-      if (m.start > last) {
-        spans.add(TextSpan(text: text.substring(last, m.start)));
-      }
-      spans.add(_span(m.group(0)!, context));
-      last = m.end;
-    }
-    if (last < text.length) spans.add(TextSpan(text: text.substring(last)));
-    if (spans.isEmpty) spans.add(const TextSpan(text: ''));
-    return Text.rich(TextSpan(children: spans), style: style);
-  }
-
-  InlineSpan _span(String tok, BuildContext ctx) {
-    // 链接：可点击打开（失败则复制链接 + toast）。
-    final lm = RegExp(r'^\[([^\]]+)\]\(([^)]+)\)$').firstMatch(tok);
-    if (lm != null) {
-      final label = lm.group(1)!;
-      final url = lm.group(2)!;
-      // 捕获 messenger，避免异步间隙使用 BuildContext（链接可能跨 await）。
-      final messenger = ScaffoldMessenger.of(ctx);
-      return TextSpan(
-        text: label,
-        style: const TextStyle(
-            color: AppColors.accent, decoration: TextDecoration.underline),
-        recognizer: TapGestureRecognizer()
-          ..onTap = () async {
-            final uri = Uri.tryParse(url);
-            if (uri != null) {
-              try {
-                if (!await launchUrl(uri,
-                    mode: LaunchMode.externalApplication)) {
-                  copyToClipboard(messenger, url);
-                }
-                return;
-              } catch (_) {
-                // 无可用浏览器等：退回复制链接。
-              }
-            }
-            copyToClipboard(messenger, url);
-          },
-      );
-    }
-    // 行内码
-    if (tok.startsWith('`') && tok.endsWith('`') && tok.length > 1) {
-      return WidgetSpan(
-        alignment: PlaceholderAlignment.middle,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-          decoration: BoxDecoration(
-            color: AppColors.keyCap,
-            borderRadius: BorderRadius.circular(5),
-          ),
-          child: Text(tok.substring(1, tok.length - 1),
-              style: AppText.mono.copyWith(fontSize: 12)),
-        ),
-      );
-    }
-    // 加粗斜体
-    if (tok.startsWith('***') || tok.startsWith('___')) {
-      return TextSpan(
-        text: tok.substring(3, tok.length - 3),
-        style:
-            const TextStyle(fontWeight: FontWeight.w700, fontStyle: FontStyle.italic),
-      );
-    }
-    // 加粗
-    if (tok.startsWith('**') || tok.startsWith('__')) {
-      return TextSpan(
-        text: tok.substring(2, tok.length - 2),
-        style: const TextStyle(fontWeight: FontWeight.w700),
-      );
-    }
-    // 斜体
-    if ((tok.startsWith('*') && tok.endsWith('*')) ||
-        (tok.startsWith('_') && tok.endsWith('_'))) {
-      return TextSpan(
-        text: tok.substring(1, tok.length - 1),
-        style: const TextStyle(fontStyle: FontStyle.italic),
-      );
-    }
-    return TextSpan(text: tok);
   }
 }
