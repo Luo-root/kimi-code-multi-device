@@ -4,7 +4,6 @@ import 'package:url_launcher/url_launcher.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
 import '../theme/app_dimens.dart';
-import '../theme/app_icons.dart';
 import '../widgets/common.dart';
 
 /// 列表项（marker 如 "1." 或 "•"，text 为内容）。
@@ -218,7 +217,8 @@ class MarkdownView extends StatelessWidget {
                 )
               else
                 const Spacer(),
-              _copyBtn(code, ctx),
+              // §UX-2.2：代码块保留复制按钮（高频操作），深色块内用幽灵样式。
+              CopyButton(text: code, dark: true),
             ],
           ),
           SingleChildScrollView(
@@ -235,22 +235,6 @@ class MarkdownView extends StatelessWidget {
     );
   }
 
-  /// 复制按钮：右上角，点击写入剪贴板 + toast。消息 / 代码块 / 命令共用。
-  Widget _copyBtn(String text, BuildContext ctx) {
-    return Pressable(
-      onTap: () => copyToClipboard(ScaffoldMessenger.of(ctx), text),
-      child: Container(
-        width: 30,
-        height: 30,
-        margin: const EdgeInsets.fromLTRB(0, 4, 4, 0),
-        decoration: const BoxDecoration(
-          color: Color(0x33FFFFFF),
-          shape: BoxShape.circle,
-        ),
-        child: const Icon(AppIcons.copy, size: 14, color: Color(0xFFC7C7CC)),
-      ),
-    );
-  }
 }
 
 /// 行内 Markdown：解析 **bold**、*italic*、`code`、[text](url)。

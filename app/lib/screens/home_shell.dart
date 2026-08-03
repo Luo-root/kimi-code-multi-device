@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../relay/models.dart';
 import '../relay/relay_client.dart';
 import '../relay/session_store.dart';
@@ -11,10 +12,14 @@ import '../theme/app_icons.dart';
 import '../widgets/common.dart';
 import '../widgets/stream_block.dart';
 import '../widgets/generating.dart';
+import '../widgets/kimi_core.dart';
 
 // ---------- 常量 ----------
 
 const _kDefaultRelayUrl = 'ws://127.0.0.1:7331/ws';
+
+// 实测基线（设置页"关于"与 AI 身份标识共用同一值）。
+const _kTestedBaseline = 'Kimi Code CLI 0.31.0';
 
 // chip = 你的自由文本常用语（点选即发）；slash = Kimi 命令（来自 available_commands）。
 const _chips = ['跑下测试', 'commit 一下', '解释刚干了啥'];
@@ -88,12 +93,18 @@ class _HomeShellState extends State<HomeShell> {
 
   /// 用户是否在列表底部附近：非底部时新消息不应把视口拽回（§UX 防滚动劫持）。
   bool _atBottom = true;
+  /// §UX-4.2：不在底部时累计的新消息数（驱动 FAB 角标）。
+  int _newWhileAway = 0;
+  int _lastBlockCount = 0;
+  String? _lastSid;
   /// 底部 dock 真实高度（动态测量，替代写死的 360/230/150）。
   double _dockH = 150;
 
   String _relayUrl = _kDefaultRelayUrl;
   String _effortId = 'medium'; // 占位
   String? _slashQuery;
+  /// 已 toast 过的 relay.error（去重，避免同一错误反复弹；恢复后重置）。§UX-7.2-3。
+  String? _lastShownError;
 
   @override
   void initState() {
@@ -111,7 +122,11 @@ class _HomeShellState extends State<HomeShell> {
     if (!_scrollCtrl.hasClients) return;
     final pos = _scrollCtrl.position;
     final atBottom = pos.pixels >= pos.maxScrollExtent - 60;
-    if (atBottom != _atBottom) _atBottom = atBottom;
+    if (atBottom != _atBottom) {
+      _atBottom = atBottom;
+      // 回到底部时清零新消息角标。
+      if (atBottom && _newWhileAway != 0) _newWhileAway = 0;
+    }
   }
 
   /// 测量 dock 真实高度，变化时刷新列表底部留白，避免消息被 dock 遮挡。
@@ -125,6 +140,27 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   void _onStore() {
+    // §UX-4.2：不在底部时收到新 block，累计角标。
+    final sid = _store.currentSid;
+    // 切换会话时重置计数（不同会话的 blocks 不可比）。
+    if (sid != _lastSid) {
+      _lastSid = sid;
+      _newWhileAway = 0;
+      _lastBlockCount = 0;
+    }
+    final count = _store.blocksOf(sid).length;
+    if (!_atBottom && count > _lastBlockCount) {
+      _newWhileAway += count - _lastBlockCount;
+    }
+    _lastBlockCount = count;
+    // §UX-7.2-3：relay.error 可见化——非阻断 toast，同错误去重；连接恢复后允许再次提醒。
+    final err = _store.lastError;
+    if (err != null && err != _lastShownError) {
+      _lastShownError = err;
+      _showRelayError(err);
+    } else if (_store.relayState == 'ok' && _lastShownError != null) {
+      _lastShownError = null;
+    }
     setState(() {});
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _measureDock();
@@ -172,14 +208,42 @@ class _HomeShellState extends State<HomeShell> {
 
   // ---- 输入 / slash / 附件 ----
 
+  /// 判断 blocks[i] 是否为一个 AI 输出轮的起点（user 之后的首个 AI 块，或列表首块）。
+  bool _atTurnStart(List<StreamBlock> blocks, int i) {
+    if (blocks[i].kind == BlockKind.user) return false;
+    return i == 0 || blocks[i - 1].kind == BlockKind.user;
+  }
+
+  /// 当前 AI 输出轮的起点索引（最后一个 user 块之后的首个 AI 块）；
+  /// 返回可能等于 blocks.length（user 是最后一块，AI 块未出现），此时无有效起点。
+  int _currentTurnStart(List<StreamBlock> blocks) {
+    for (var i = blocks.length - 1; i >= 0; i--) {
+      if (blocks[i].kind == BlockKind.user) return i + 1;
+    }
+    return 0;
+  }
+
   void _send(String text) {
     final t = text.trim();
     final sid = _store.currentSid;
     if (t.isEmpty || sid == null || _store.relayState != 'ok') return;
-    // 运行中（AI 还在输出）忽略发送：发送键已隐藏为「停」，Enter 也不应漏发。
-    if (_store.busyOf(sid)) return;
+    // §UX-5.1-2：busy 时不再静默吞掉发送——给出明确反馈。
+    if (_store.busyOf(sid)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Kimi 正在输出，完成后才能发送下一条',
+              style: AppText.callout.copyWith(color: AppColors.surface)),
+          backgroundColor: AppColors.textPrimary,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          duration: const Duration(milliseconds: 1600),
+        ),
+      );
+      return;
+    }
     _store.addUser(sid, t);
     _client.send('prompt', sid: sid, payload: {'text': t});
+    HapticFeedback.lightImpact(); // §UX-8.2-2：发送 = .light。
     _inputCtrl.clear();
     setState(() => _slashQuery = null);
     // 自己发的消息：强制滚到底，确保看到最新。
@@ -229,6 +293,51 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
+  /// §UX-7.2-3：relay.error 可见化——非阻断 toast 展示错误摘要，
+  /// 点「详情」看全文（可选中复制）。
+  void _showRelayError(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message,
+            style: AppText.callout.copyWith(color: AppColors.surface),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis),
+        backgroundColor: AppColors.reject,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        duration: const Duration(milliseconds: 4000),
+        action: SnackBarAction(
+          label: '详情',
+          textColor: AppColors.surface,
+          onPressed: () => showDialog<void>(
+            context: context,
+            builder: (_) => AlertDialog(
+              backgroundColor: AppColors.surface,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(AppRadius.card)),
+              title: Text('中继报错', style: AppText.title2),
+              content: SingleChildScrollView(
+                child: SelectableText(message, style: AppText.mono),
+              ),
+              actions: [
+                Pressable(
+                  onTap: () => Navigator.of(context).pop(),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 8),
+                    child: Text('关闭',
+                        style:
+                            AppText.callout.copyWith(color: AppColors.accent)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   // ---- 抽屉动作 ----
 
   /// 侧边栏点会话 = 切换，不是给主屏加一个可切换会话。
@@ -247,6 +356,12 @@ class _HomeShellState extends State<HomeShell> {
   void _decide(PermOption opt) {
     final p = _store.pendingOf(_store.currentSid);
     if (p == null) return;
+    // §UX-8.2-2：拒绝 = .heavy，批准 = .medium，权重感不同。
+    if (opt.kind == 'reject_once') {
+      HapticFeedback.heavyImpact();
+    } else {
+      HapticFeedback.mediumImpact();
+    }
     _client.send('permission.decision',
         sid: p.sid,
         payload: {'permissionId': p.permissionId, 'optionId': opt.optionId});
@@ -325,13 +440,23 @@ class _HomeShellState extends State<HomeShell> {
     final dockH = _dockH; // 动态测量，替代写死的 360/230/150
     // §13「停」随 AI 输出态：busy（session/prompt 进行中）时显眼，输出完退场。
     final running = sid != null && _store.busyOf(sid);
-    // §3 生成状态动效：AI 已接到消息但尚未产出任何内容（等待首 token）时显示呼吸动画。
-    final lastKind = blocks.isNotEmpty ? blocks.last.kind : null;
-    final aiStarted =
-        lastKind != null && lastKind != BlockKind.user; // 有 think/text/tool 即视为已开始
-    final showWaiting = running && !aiStarted;
+    // §3 生成状态动效：AI 输出全程（running）持续显示呼吸光点，直至输出结束收起。
+    // 等待首 token（最后一块还是 user，AI 块未出现）时，标识作为列表尾部占位；
+    // 一旦 AI 块出现，标识改在轮起点渲染（见 itemBuilder）。
+    final needTailIdentity =
+        running && (blocks.isEmpty || blocks.last.kind == BlockKind.user);
 
-    return Scaffold(
+    // 有弹层打开时拦截返回手势：先关最上层弹层，而非直接退出页面（§UX-1.5）。
+    return AnimatedBuilder(
+      animation: PopupRegistry.instance,
+      builder: (ctx, child) => PopScope(
+        canPop: !PopupRegistry.instance.hasOpen,
+        onPopInvokedWithResult: (didPop, _) {
+          if (!didPop) PopupRegistry.instance.closeTopmost();
+        },
+        child: child!,
+      ),
+      child: Scaffold(
       backgroundColor: AppColors.background,
       drawer: Drawer(
         width: 280,
@@ -387,26 +512,39 @@ class _HomeShellState extends State<HomeShell> {
                               8,
                               AppSpacing.pageMargin,
                               dockH),
-                          itemCount: blocks.length + (showWaiting ? 1 : 0),
+                          // 等待首 token（最后一块还是 user）时，标识作为列表尾部占位；
+                          // 一旦 AI 块出现，标识渲染在轮起点，不再需要尾部占位。
+                          itemCount: blocks.length +
+                              (needTailIdentity ? 1 : 0),
                           itemBuilder: (_, i) {
                             if (i < blocks.length) {
-                              return Padding(
-                                padding: EdgeInsets.only(
-                                    bottom: i == blocks.length - 1
-                                        ? 0
-                                        : AppSpacing.lg),
-                                child: StreamBlockView(
-                                  block: blocks[i],
-                                  streaming: running && i == blocks.length - 1,
-                                ),
+                              // §3.2-1 AI 身份标识：每轮输出顶部（KimiCore 星形 + 基线名）。
+                              // 当前正在输出的轮动态转动，历史轮静止。
+                              final curTurn =
+                                  running ? _currentTurnStart(blocks) : null;
+                              return Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  if (_atTurnStart(blocks, i))
+                                    _AiIdentityBar(
+                                        streaming: i == curTurn),
+                                  Padding(
+                                    padding: EdgeInsets.only(
+                                        bottom: i == blocks.length - 1
+                                            ? 0
+                                            : AppSpacing.lg),
+                                    child: StreamBlockView(
+                                      block: blocks[i],
+                                      streaming: running &&
+                                          i == blocks.length - 1,
+                                    ),
+                                  ),
+                                ],
                               );
                             }
-                            // 等待首 token：三点呼吸动画（§3.2-1 / §3.1-2）。
-                            return const Padding(
-                              padding: EdgeInsets.only(
-                                  left: AppSpacing.pageMargin, top: AppSpacing.sm),
-                              child: BreathingDots(),
-                            );
+                            // 发送后等待首 token：AI 块还没出现，标识在 user 下方、
+                            // 即"即将输出内容的最上面"，动态转动。
+                            return _AiIdentityBar(streaming: true);
                           },
                         ),
                   // §3.2-4 全局生成状态条：busy 全程 2px indeterminate 进度，输出完收起。
@@ -419,6 +557,27 @@ class _HomeShellState extends State<HomeShell> {
                         backgroundColor: Colors.transparent,
                         color: AppColors.accent,
                         minHeight: 2,
+                      ),
+                    ),
+                  // §UX-4.2：上滑后浮现「回到底部」FAB，有新消息时带角标。
+                  if (!_atBottom && blocks.isNotEmpty)
+                    Positioned(
+                      right: AppSpacing.pageMargin,
+                      bottom: 8,
+                      child: _ScrollBottomFab(
+                        newCount: _newWhileAway,
+                        onTap: () {
+                          _atBottom = true;
+                          _newWhileAway = 0;
+                          setState(() {});
+                          if (_scrollCtrl.hasClients) {
+                            _scrollCtrl.animateTo(
+                              _scrollCtrl.position.maxScrollExtent,
+                              duration: const Duration(milliseconds: 300),
+                              curve: Curves.easeOut,
+                            );
+                          }
+                        },
                       ),
                     ),
                   Positioned(
@@ -449,6 +608,7 @@ class _HomeShellState extends State<HomeShell> {
             ),
           ],
         ),
+      ),
       ),
     );
   }
@@ -518,9 +678,10 @@ class _TopBar extends StatelessWidget {
   Widget _iconBtn(IconData icon, {VoidCallback? onTap}) {
     return Pressable(
       onTap: onTap ?? () {},
+      // §UX-10.2-1：命中区域 44×44。
       child: SizedBox(
-        width: 36,
-        height: 36,
+        width: 44,
+        height: 44,
         child: Icon(icon, size: 20, color: AppColors.textPrimary),
       ),
     );
@@ -545,6 +706,9 @@ class _ModeIconMenu extends StatefulWidget {
 
 class _ModeIconMenuState extends State<_ModeIconMenu> {
   OverlayEntry? _entry;
+  /// 退场动画中尚未移除的 entry；重开时先强制移除，避免 GlobalKey 冲突。
+  OverlayEntry? _exiting;
+  final _popupKey = GlobalKey<PopupAnimatorState>();
   bool _down = false;
   double _menuMaxH = 320;
   bool get _open => _entry != null;
@@ -564,6 +728,7 @@ class _ModeIconMenuState extends State<_ModeIconMenu> {
   }
 
   void _openMenu() {
+    _killExiting();
     final box = context.findRenderObject() as RenderBox;
     final off = box.localToGlobal(Offset.zero);
     final cur = _cfgCur(widget.cfg, 'mode');
@@ -575,67 +740,84 @@ class _ModeIconMenuState extends State<_ModeIconMenu> {
     final above = availBelow < 320 && availAbove > availBelow;
     _menuMaxH = (above ? availAbove : availBelow).clamp(160.0, 360.0);
     _entry = OverlayEntry(
-      builder: (ctx) => Stack(
-        children: [
-          Positioned.fill(
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: _close,
-              child: const SizedBox.shrink(),
-            ),
+      builder: (ctx) => PopupAnimator(
+        key: _popupKey,
+        onScrimTap: _close,
+        origin: above ? Alignment.bottomRight : Alignment.topRight,
+        top: above ? null : topY,
+        bottom: above ? (vh - off.dy + 6) : null,
+        right: 8,
+        width: 220,
+        child: Container(
+          clipBehavior: Clip.antiAlias,
+          decoration: BoxDecoration(
+            color: AppColors.surface,
+            borderRadius: BorderRadius.circular(AppRadius.card),
+            boxShadow: AppShadows.popup,
           ),
-          Positioned(
-            top: above ? null : topY,
-            bottom: above ? (vh - off.dy + 6) : null,
-            right: 8,
-            width: 220,
-            child: Container(
-              clipBehavior: Clip.antiAlias,
-              decoration: BoxDecoration(
-                color: AppColors.surface,
-                borderRadius: BorderRadius.circular(AppRadius.card),
-                boxShadow: AppShadows.popup,
-              ),
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              child: ConstrainedBox(
-                constraints: BoxConstraints(maxHeight: _menuMaxH),
-                child: SingleChildScrollView(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: _modes
-                        .map((m) => _MenuRow(
-                              icon: _modeIcon[m['value']] ?? AppIcons.modeManual,
-                              label: m['name']?.toString() ??
-                                  m['value']?.toString() ??
-                                  '',
-                              selected: m['value'] == cur,
-                              onTap: () {
-                                widget.onMode(m['value']?.toString() ?? '');
-                                _close();
-                              },
-                            ))
-                        .toList(),
-                  ),
-                ),
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: _menuMaxH),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: _modes
+                    .map((m) => _MenuRow(
+                          icon: _modeIcon[m['value']] ?? AppIcons.modeManual,
+                          label: m['name']?.toString() ??
+                              m['value']?.toString() ??
+                              '',
+                          selected: m['value'] == cur,
+                          onTap: () {
+                            widget.onMode(m['value']?.toString() ?? '');
+                            _close();
+                          },
+                        ))
+                    .toList(),
               ),
             ),
           ),
-        ],
+        ),
       ),
     );
     Overlay.of(context).insert(_entry!);
+    PopupRegistry.instance.register(_close);
     setState(() {});
   }
 
+  void _killExiting() {
+    final e = _exiting;
+    if (e != null) {
+      _exiting = null;
+      e.remove();
+    }
+  }
+
   void _close() {
-    _entry?.remove();
+    final entry = _entry;
+    if (entry == null) return;
     _entry = null;
+    PopupRegistry.instance.unregister(_close);
     if (mounted) setState(() {});
+    // 先播退场动画再移除 entry（§UX-1.1：反向 120ms easeIn）。
+    final st = _popupKey.currentState;
+    if (st == null) {
+      entry.remove();
+      return;
+    }
+    _exiting = entry;
+    st.dismiss().then((_) {
+      if (_exiting != entry) return; // 已被重开逻辑强制移除。
+      _exiting = null;
+      entry.remove();
+    });
   }
 
   @override
   void dispose() {
+    if (_entry != null) PopupRegistry.instance.unregister(_close);
     _entry?.remove();
+    _killExiting();
     super.dispose();
   }
 
@@ -649,15 +831,22 @@ class _ModeIconMenuState extends State<_ModeIconMenu> {
       onTapUp: (_) => setState(() => _down = false),
       onTapCancel: () => setState(() => _down = false),
       onTap: _toggle,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 120),
-        width: 32,
-        height: 32,
-        decoration: BoxDecoration(
-          color: _down ? const Color(0xFFDADAE0) : AppColors.keyCap,
-          shape: BoxShape.circle,
+      // §UX-10.2-1：视觉 32px，命中区域 44×44。
+      child: SizedBox(
+        width: 44,
+        height: 44,
+        child: Center(
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 120),
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+              color: _down ? const Color(0xFFDADAE0) : AppColors.keyCap,
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, size: 16, color: AppColors.textPrimary),
+          ),
         ),
-        child: Icon(icon, size: 16, color: AppColors.textPrimary),
       ),
     );
   }
@@ -749,8 +938,13 @@ class _CascadeConfigMenu extends StatefulWidget {
 
 class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
   OverlayEntry? _entry;
+  /// 退场动画中尚未移除的 entry；重开时先强制移除，避免 GlobalKey 冲突。
+  OverlayEntry? _exiting;
+  final _popupKey = GlobalKey<PopupAnimatorState>();
   bool _down = false;
   double _menuMaxH = 300;
+  /// 级联导航方向：true = 下钻（新层从右入），false = 返回（§UX-1.2 层级过渡）。
+  bool _navForward = true;
   bool get _open => _entry != null;
 
   List<Map<String, dynamic>> get _models => _cfgList(widget.cfg, 'model');
@@ -780,9 +974,11 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
   void _toggle() => _open ? _close() : _openMenu();
 
   void _openMenu() {
+    _killExiting();
     final cur = _curModel;
     var level = 0;
     var selProv = _provOf(cur);
+    _navForward = true;
     final box = context.findRenderObject() as RenderBox;
     final off = box.localToGlobal(Offset.zero);
 
@@ -801,73 +997,125 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
 
     _entry = OverlayEntry(builder: (ctx) {
       return StatefulBuilder(builder: (ctx2, setOverlay) {
-        return Stack(
-          children: [
-            Positioned.fill(
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: _close,
-                child: const SizedBox.shrink(),
-              ),
+        return PopupAnimator(
+          key: _popupKey,
+          onScrimTap: _close,
+          origin: above ? Alignment.bottomLeft : Alignment.topLeft,
+          top: above ? null : topY,
+          bottom: above ? (vh - off.dy + 6) : null,
+          left: left,
+          width: width,
+          child: Container(
+            clipBehavior: Clip.antiAlias,
+            decoration: BoxDecoration(
+              color: AppColors.surface,
+              borderRadius: BorderRadius.circular(AppRadius.card),
+              boxShadow: AppShadows.popup,
             ),
-            Positioned(
-              top: above ? null : topY,
-              bottom: above ? (vh - off.dy + 6) : null,
-              left: left,
-              width: width,
-              child: Container(
-                clipBehavior: Clip.antiAlias,
-                decoration: BoxDecoration(
-                  color: AppColors.surface,
-                  borderRadius: BorderRadius.circular(AppRadius.card),
-                  boxShadow: AppShadows.popup,
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _header(level, selProv, setOverlay, () {
-                      setOverlay(() {
-                        if (level > 0) level--;
-                      });
-                    }),
-                    ConstrainedBox(
-                      constraints: BoxConstraints(maxHeight: _menuMaxH),
-                      child: SingleChildScrollView(
-                        child: _levelList(level, selProv, (prov) {
-                          setOverlay(() {
-                            selProv = prov;
-                            level = 1;
-                          });
-                        }, (modelVal) {
-                          widget.onModel(modelVal);
-                          _close();
-                        }, (effId) {
-                          widget.onEffort(effId);
-                          _close();
-                        }, setOverlay),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _header(level, selProv, setOverlay, () {
+                  _navForward = false;
+                  setOverlay(() {
+                    if (level > 0) level--;
+                  });
+                }),
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxHeight: _menuMaxH),
+                  child: SingleChildScrollView(
+                    // 层级切换：水平位移 + 淡入淡出，高度变化用 AnimatedSize 平滑（§UX-1.2）。
+                    child: AnimatedSize(
+                      duration: const Duration(milliseconds: 200),
+                      curve: Curves.easeOut,
+                      alignment: Alignment.topCenter,
+                      child: AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 200),
+                        switchInCurve: Curves.easeOut,
+                        switchOutCurve: Curves.easeIn,
+                        layoutBuilder: (current, previous) => Stack(
+                          alignment: Alignment.topCenter,
+                          children: [
+                            ...previous,
+                            ?current,
+                          ],
+                        ),
+                        transitionBuilder: (child, anim) {
+                          // 下钻：新层右侧入、旧层左侧出；返回时相反。
+                          final incoming = child.key == ValueKey(level);
+                          final begin = (_navForward == incoming)
+                              ? const Offset(0.12, 0)
+                              : const Offset(-0.12, 0);
+                          return SlideTransition(
+                            position: Tween(begin: begin, end: Offset.zero)
+                                .animate(anim),
+                            child: FadeTransition(opacity: anim, child: child),
+                          );
+                        },
+                        child: KeyedSubtree(
+                          key: ValueKey(level),
+                          child: _levelList(level, selProv, (prov) {
+                            _navForward = true;
+                            setOverlay(() {
+                              selProv = prov;
+                              level = 1;
+                            });
+                          }, (modelVal) {
+                            widget.onModel(modelVal);
+                            _close();
+                          }, (effId) {
+                            widget.onEffort(effId);
+                            _close();
+                          }, setOverlay),
+                        ),
                       ),
                     ),
-                  ],
+                  ),
                 ),
-              ),
+              ],
             ),
-          ],
+          ),
         );
       });
     });
     Overlay.of(context).insert(_entry!);
+    PopupRegistry.instance.register(_close);
     setState(() {});
   }
 
+  void _killExiting() {
+    final e = _exiting;
+    if (e != null) {
+      _exiting = null;
+      e.remove();
+    }
+  }
+
   void _close() {
-    _entry?.remove();
+    final entry = _entry;
+    if (entry == null) return;
     _entry = null;
+    PopupRegistry.instance.unregister(_close);
     if (mounted) setState(() {});
+    // 先播退场动画再移除 entry（§UX-1.1：反向 120ms easeIn）。
+    final st = _popupKey.currentState;
+    if (st == null) {
+      entry.remove();
+      return;
+    }
+    _exiting = entry;
+    st.dismiss().then((_) {
+      if (_exiting != entry) return; // 已被重开逻辑强制移除。
+      _exiting = null;
+      entry.remove();
+    });
   }
 
   @override
   void dispose() {
+    if (_entry != null) PopupRegistry.instance.unregister(_close);
     _entry?.remove();
+    _killExiting();
     super.dispose();
   }
 
@@ -894,12 +1142,17 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
           else
             const SizedBox(width: 28, height: 28),
           Expanded(
-            child: Text(
-              titles[level],
-              textAlign: TextAlign.center,
-              style: AppText.callout.copyWith(fontWeight: FontWeight.w600),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+            // 标题随层级淡入淡出切换（§UX-1.2）。
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 180),
+              child: Text(
+                titles[level],
+                key: ValueKey(level),
+                textAlign: TextAlign.center,
+                style: AppText.callout.copyWith(fontWeight: FontWeight.w600),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
             ),
           ),
           const SizedBox(width: 28, height: 28),
@@ -942,9 +1195,12 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
           // 想调深度再单独点进来（§9 级联，去摩擦）。
           _row('思考深度',
               trailing: AppIcons.chevronRight,
-              onTap: () => setOverlay(() {
-                    level = 2;
-                  })),
+              onTap: () {
+                _navForward = true;
+                setOverlay(() {
+                  level = 2;
+                });
+              }),
         ],
       );
     }
@@ -1284,6 +1540,35 @@ class _SessionDrawerState extends State<_SessionDrawer> {
   }
 }
 
+// ---------- AI 身份标识（§3.2-1：每轮输出顶部）----------
+
+/// AI 输出轮的身份标识：KimiCore 星形 + 实测基线名。
+/// 该轮正在流式输出时星形动态转动，输出结束/历史轮静止（身份标识语义）。
+class _AiIdentityBar extends StatelessWidget {
+  final bool streaming;
+  const _AiIdentityBar({required this.streaming});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+      child: Row(
+        children: [
+          KimiCoreIndicator(
+            size: 24,
+            alignment: Alignment.centerLeft,
+            animated: streaming,
+          ),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(_kTestedBaseline, style: AppText.monoCaption),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 // ---------- 空状态：点阵装饰（规范 7.1）----------
 
 class _EmptyState extends StatelessWidget {
@@ -1347,6 +1632,58 @@ class _DotMatrix extends StatelessWidget {
               );
             }),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------- 回到底部 FAB（§UX-4.2）----------
+
+/// 上滑后浮现的圆形回底按钮，有新消息时带数字角标。
+class _ScrollBottomFab extends StatelessWidget {
+  final int newCount;
+  final VoidCallback onTap;
+  const _ScrollBottomFab({required this.newCount, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Pressable(
+      onTap: onTap,
+      child: Container(
+        width: 44,
+        height: 44,
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          shape: BoxShape.circle,
+          boxShadow: AppShadows.popup,
+        ),
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            const Icon(AppIcons.chevronDown,
+                size: 18, color: AppColors.textPrimary),
+            if (newCount > 0)
+              Positioned(
+                top: 2,
+                right: 2,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 5, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: AppColors.accent,
+                    borderRadius: BorderRadius.circular(AppRadius.pill),
+                  ),
+                  constraints: const BoxConstraints(minWidth: 16),
+                  child: Text(
+                    newCount > 99 ? '99+' : '$newCount',
+                    textAlign: TextAlign.center,
+                    style: AppText.monoCaption.copyWith(
+                        color: AppColors.surface, fontSize: 9),
+                  ),
+                ),
+              ),
+          ],
         ),
       ),
     );
@@ -1543,16 +1880,22 @@ class _InputBar extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
+          // §UX-10.2-1：视觉 32px，命中区域 44×44。
           Pressable(
             onTap: onOpenPlus,
-            child: Container(
-              width: 32,
-              height: 32,
-              margin: const EdgeInsets.only(bottom: 4),
-              decoration: const BoxDecoration(
-                  color: AppColors.keyCap, shape: BoxShape.circle),
-              child:
-                  const Icon(AppIcons.plus, size: 18, color: AppColors.textSecondary),
+            child: SizedBox(
+              width: 44,
+              height: 44,
+              child: Center(
+                child: Container(
+                  width: 32,
+                  height: 32,
+                  decoration: const BoxDecoration(
+                      color: AppColors.keyCap, shape: BoxShape.circle),
+                  child:
+                      const Icon(AppIcons.plus, size: 18, color: AppColors.textSecondary),
+                ),
+              ),
             ),
           ),
           const SizedBox(width: AppSpacing.sm),
@@ -1588,31 +1931,47 @@ class _InputBar extends StatelessWidget {
                   active: running,
                   child: Pressable(
                     onTap: onStop,
-                    child: Container(
-                      width: 32,
-                      height: 32,
-                      decoration: const BoxDecoration(
-                        color: AppColors.reject,
-                        shape: BoxShape.circle,
+                    // §UX-10.2-1：视觉 32px，命中区域 44×44。
+                    child: SizedBox(
+                      width: 44,
+                      height: 44,
+                      child: Center(
+                        child: Container(
+                          width: 32,
+                          height: 32,
+                          decoration: const BoxDecoration(
+                            color: AppColors.reject,
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(AppIcons.stop,
+                              size: 14, color: AppColors.surface),
+                        ),
                       ),
-                      child: const Icon(AppIcons.stop,
-                          size: 14, color: AppColors.surface),
                     ),
                   ),
                 )
               : Pressable(
                   onTap: enabled ? () => onSend(controller.text) : () {},
-                  child: Container(
-                    width: 32,
-                    height: 32,
-                    decoration: BoxDecoration(
-                      color: enabled ? AppColors.textPrimary : AppColors.keyCap,
-                      shape: BoxShape.circle,
+                  // §UX-10.2-1：视觉 32px，命中区域 44×44。
+                  child: SizedBox(
+                    width: 44,
+                    height: 44,
+                    child: Center(
+                      child: Container(
+                        width: 32,
+                        height: 32,
+                        decoration: BoxDecoration(
+                          color:
+                              enabled ? AppColors.textPrimary : AppColors.keyCap,
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(AppIcons.send,
+                            size: 16,
+                            color: enabled
+                                ? AppColors.surface
+                                : AppColors.placeholder),
+                      ),
                     ),
-                    child: Icon(AppIcons.send,
-                        size: 16,
-                        color:
-                            enabled ? AppColors.surface : AppColors.placeholder),
                   ),
                 ),
         ],
@@ -1635,26 +1994,45 @@ class _PermSheet extends StatefulWidget {
   State<_PermSheet> createState() => _PermSheetState();
 }
 
-class _PermSheetState extends State<_PermSheet> {
+class _PermSheetState extends State<_PermSheet>
+    with SingleTickerProviderStateMixin {
   bool _expanded = false;
   late final DateTime _deadline;
+  /// 倒计时初始总时长：作为进度环比例的分母（§UX-6.2-2）。
+  late final Duration _total;
   Timer? _t;
   Duration _remaining = Duration.zero;
+
+  /// 入场动画：translateY 24→0 + fade，220ms easeOut（§UX-6.2-1）。
+  late final AnimationController _enter = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 220),
+  );
+  late final CurvedAnimation _enterCurve =
+      CurvedAnimation(parent: _enter, curve: Curves.easeOut);
+  late final Animation<Offset> _slide =
+      Tween(begin: const Offset(0, 0.16), end: Offset.zero)
+          .animate(_enterCurve);
 
   @override
   void initState() {
     super.initState();
     _deadline = widget.perm.deadline ??
         DateTime.now().add(_kDefaultPermTimeout);
+    _total = _deadline.difference(DateTime.now());
     _tick();
     _t = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) _tick();
     });
+    _enter.forward();
+    HapticFeedback.mediumImpact(); // 批准请求是最高优先级交互，给触觉提醒。
   }
 
   @override
   void dispose() {
     _t?.cancel();
+    _enterCurve.dispose();
+    _enter.dispose();
     super.dispose();
   }
 
@@ -1669,7 +2047,19 @@ class _PermSheetState extends State<_PermSheet> {
     final p = widget.perm;
     final critical = isCriticalCommand(p.command);
     final barColor = critical ? AppColors.reject : AppColors.textSecondary;
+    final out = _remaining == Duration.zero;
 
+    // §UX-6.2-1 入场：translateY 24→0 + fade，220ms easeOut。
+    return FadeTransition(
+      opacity: _enterCurve,
+      child: SlideTransition(
+        position: _slide,
+        child: _card(p, critical, barColor, out),
+      ),
+    );
+  }
+
+  Widget _card(PermissionRequest p, bool critical, Color barColor, bool out) {
     return Container(
       decoration: BoxDecoration(
         color: AppColors.surface,
@@ -1722,11 +2112,31 @@ class _PermSheetState extends State<_PermSheet> {
                       const SizedBox(height: AppSpacing.md),
                       _commandBox(p.command),
                     ],
+                    // §UX-6.2-3 超时态：明确说明 + 按钮组灰化禁用，不留下可操作但无效的按钮。
+                    if (out) ...[
+                      const SizedBox(height: AppSpacing.sm),
+                      Row(
+                        children: [
+                          const Icon(AppIcons.alertTriangle,
+                              size: 13, color: AppColors.reject),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text('已超时 · Kimi 已按默认策略处理',
+                                style: AppText.caption
+                                    .copyWith(color: AppColors.reject)),
+                          ),
+                        ],
+                      ),
+                    ],
                     const SizedBox(height: AppSpacing.md),
                     Row(
                       children: [
                         for (final opt in p.options) ...[
-                          Expanded(child: _permBtn(opt)),
+                          // §UX-6.2-4：主操作「批准」占更大宽度比（2:1:1）。
+                          Expanded(
+                            flex: opt.kind == 'allow_once' ? 2 : 1,
+                            child: _permBtn(opt, disabled: out),
+                          ),
                           if (opt != p.options.last)
                             const SizedBox(width: AppSpacing.sm),
                         ],
@@ -1777,27 +2187,52 @@ class _PermSheetState extends State<_PermSheet> {
     );
   }
 
+  /// §UX-6.2-2：倒计时 chip = 3px 进度环（随剩余比例消减）+ mm:ss，
+  /// 颜色随剩余比例 green→orange→red；超时后只显示「已超时」。
   Widget _countdownChip(bool critical) {
     final m = _remaining.inMinutes.remainder(60).toString().padLeft(2, '0');
     final s = _remaining.inSeconds.remainder(60).toString().padLeft(2, '0');
     final out = _remaining == Duration.zero;
-    final color = out
+    final frac = _total.inMilliseconds > 0
+        ? (_remaining.inMilliseconds / _total.inMilliseconds).clamp(0.0, 1.0)
+        : 0.0;
+    final color = out || critical
         ? AppColors.reject
-        : (critical || _remaining.inSeconds < 60
-            ? AppColors.reject
-            : AppColors.textSecondary);
+        : frac > 0.5
+            ? AppColors.approve
+            : frac > 0.2
+                ? AppColors.warning
+                : AppColors.reject;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.1),
         borderRadius: BorderRadius.circular(AppRadius.pill),
       ),
-      child: Text(out ? '已超时' : '$m:$s',
-          style: AppText.monoCaption.copyWith(color: color)),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (!out) ...[
+            SizedBox(
+              width: 12,
+              height: 12,
+              child: CircularProgressIndicator(
+                value: frac,
+                strokeWidth: 2.5,
+                color: color,
+                backgroundColor: color.withValues(alpha: 0.18),
+              ),
+            ),
+            const SizedBox(width: 5),
+          ],
+          Text(out ? '已超时' : '$m:$s',
+              style: AppText.monoCaption.copyWith(color: color)),
+        ],
+      ),
     );
   }
 
-  Widget _permBtn(PermOption opt) {
+  Widget _permBtn(PermOption opt, {bool disabled = false}) {
     final (bg, fg, label) = switch (opt.kind) {
       'allow_once' => (AppColors.approve, AppColors.surface, '批准'),
       'allow_always' => (AppColors.keyCap, AppColors.textPrimary, '本会话'),
@@ -1805,16 +2240,19 @@ class _PermSheetState extends State<_PermSheet> {
       _ => (AppColors.keyCap, AppColors.textPrimary, opt.name ?? opt.optionId),
     };
     return Pressable(
-      onTap: () => widget.onDecide(opt),
-      child: Container(
+      onTap: disabled ? () {} : () => widget.onDecide(opt),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
         padding: const EdgeInsets.symmetric(vertical: 10),
         decoration: BoxDecoration(
-          color: bg,
+          color: disabled ? AppColors.keyCap : bg,
           borderRadius: BorderRadius.circular(AppRadius.pill),
         ),
         alignment: Alignment.center,
         child: Text(label,
-            style: AppText.callout.copyWith(color: fg, fontWeight: FontWeight.w600)),
+            style: AppText.callout.copyWith(
+                color: disabled ? AppColors.placeholder : fg,
+                fontWeight: FontWeight.w600)),
       ),
     );
   }
@@ -2084,7 +2522,7 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                 const SizedBox(height: 22),
                 _group('关于'),
                 _ro('版本', 'v0.1.0'),
-                _ro('实测基线', 'Kimi Code CLI 0.31.0'),
+                _ro('实测基线', _kTestedBaseline),
               ],
             ),
           ),
@@ -2270,7 +2708,7 @@ class _SessionSwitcher extends StatelessWidget {
         children: [
           Expanded(
             child: SizedBox(
-              height: 34,
+              height: 44, // §UX-10.2-1：触控目标高度合规
               // 多会话横向滚动浏览（单屏放不下时不截断）。
               child: ListView.separated(
                 scrollDirection: Axis.horizontal,
@@ -2283,7 +2721,10 @@ class _SessionSwitcher extends StatelessWidget {
                     title: store.titleOf(sid),
                     status: store.sessionStatus(sid),
                     selected: sid == cur,
-                    onTap: () => store.setCurrent(sid),
+                    onTap: () {
+                      HapticFeedback.selectionClick(); // §UX-8.2-2：切换会话 = .selection。
+                      store.setCurrent(sid);
+                    },
                     onClose: () => onClose(sid),
                   );
                 },
@@ -2325,7 +2766,8 @@ class _SessionTab extends StatelessWidget {
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        height: 44, // §UX-10.2-1：触控目标高度合规
+        padding: const EdgeInsets.only(left: 12),
         decoration: BoxDecoration(
           color: selected ? AppColors.accentSoft : AppColors.keyCap,
           borderRadius: BorderRadius.circular(AppRadius.pill),
@@ -2354,14 +2796,15 @@ class _SessionTab extends StatelessWidget {
                 overflow: TextOverflow.ellipsis,
               ),
             ),
-            const SizedBox(width: 2),
-            // 关闭按钮：移除此活跃会话 tab（§11 多会话管理）。
+            // 关闭按钮：视觉 13px 图标，命中区域 44×44（§UX-10.2-1）。
             Pressable(
               onTap: onClose,
-              child: const SizedBox(
-                width: 18,
-                height: 18,
-                child: Icon(AppIcons.close, size: 13, color: AppColors.textSecondary),
+              child: SizedBox(
+                width: 44,
+                height: 44,
+                child: Center(
+                  child: Icon(AppIcons.close, size: 13, color: AppColors.textSecondary),
+                ),
               ),
             ),
           ],
@@ -2531,9 +2974,10 @@ class _PendingQueuePageState extends State<_PendingQueuePage> {
   Widget _iconBtn(IconData icon, {VoidCallback? onTap}) {
     return Pressable(
       onTap: onTap ?? () {},
+      // §UX-10.2-1：命中区域 44×44。
       child: SizedBox(
-        width: 36,
-        height: 36,
+        width: 44,
+        height: 44,
         child: Icon(icon, size: 20, color: AppColors.textPrimary),
       ),
     );

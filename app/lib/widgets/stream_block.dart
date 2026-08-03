@@ -38,20 +38,6 @@ class _StreamBlockViewState extends State<StreamBlockView> {
     }
   }
 
-  /// 复制按钮（消息 / 代码块 / 命令共用）。
-  Widget _copyBtn(String text) => Pressable(
-        onTap: () => copyToClipboard(ScaffoldMessenger.of(context), text),
-        child: Container(
-          width: 30,
-          height: 30,
-          decoration: BoxDecoration(
-            color: AppColors.keyCap,
-            shape: BoxShape.circle,
-          ),
-          child: const Icon(AppIcons.copy, size: 15, color: AppColors.textSecondary),
-        ),
-      );
-
   Widget _textBlock() {
     final streaming = widget.streaming;
     return Row(
@@ -60,13 +46,14 @@ class _StreamBlockViewState extends State<StreamBlockView> {
           streaming ? CrossAxisAlignment.end : CrossAxisAlignment.start,
       children: [
         Expanded(child: MarkdownView(data: widget.block.text)),
-        const SizedBox(width: 4),
         if (streaming) const BlinkingCursor(),
-        _copyBtn(widget.block.text),
+        // §UX-2.2：流式未完成时不渲染复制按钮（半截内容不可复制）。
+        if (!streaming) CopyButton(text: widget.block.text),
       ],
     );
   }
 
+  /// §UX-2.2：用户气泡不带复制按钮（自己发的话无需复制入口）。
   Widget _user() {
     return Row(
       mainAxisAlignment: MainAxisAlignment.end,
@@ -83,8 +70,6 @@ class _StreamBlockViewState extends State<StreamBlockView> {
             child: Text(widget.block.text, style: AppText.body),
           ),
         ),
-        const SizedBox(width: 6),
-        _copyBtn(widget.block.text),
       ],
     );
   }
@@ -97,8 +82,8 @@ class _StreamBlockViewState extends State<StreamBlockView> {
         borderRadius: BorderRadius.circular(AppRadius.thumbnail),
       ),
       child: AnimatedSize(
-        duration: const Duration(milliseconds: 200),
-        curve: Curves.easeOut,
+        duration: const Duration(milliseconds: 250),
+        curve: Curves.easeOutCubic,
         alignment: Alignment.topCenter,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -178,8 +163,8 @@ class _StreamBlockViewState extends State<StreamBlockView> {
             ),
             Expanded(
               child: AnimatedSize(
-                duration: const Duration(milliseconds: 200),
-                curve: Curves.easeOut,
+                duration: const Duration(milliseconds: 250),
+                curve: Curves.easeOutCubic,
                 alignment: Alignment.topCenter,
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -254,7 +239,7 @@ class _StreamBlockViewState extends State<StreamBlockView> {
                               ),
                             ),
                             const SizedBox(width: 6),
-                            _copyBtn(b.command!),
+                            CopyButton(text: b.command!),
                           ],
                         ),
                       ),
