@@ -1,7 +1,7 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
-/// KimiCore 生成动画：移植自 Initialize.svg（简约版）。
+/// KimiCore 生成动画：移植自 svg（简约版）。
 /// 双层八角菱形反向折叠旋转——外层顺时针、内层逆时针，
 /// 周期中点收束至 12% 后回弹，传达“AI 正在凝聚、思考中”。
 ///
