@@ -213,6 +213,21 @@ class _HomeShellState extends State<HomeShell> {
 
   void _onEffort(String e) => setState(() => _effortId = e); // 占位，不下发
 
+  // ---- 渲染分组 ----
+
+  /// 把 AgentGroupItem 路由到正确的 widget：SingleBlockGroup → StreamBlockView，
+  /// AgentGroup → AgentGroupView（整体可折叠）。
+  Widget _renderGroup(AgentGroupItem g, bool running, bool isTail) {
+    final streaming = running && isTail;
+    if (g is SingleBlockGroup) {
+      return StreamBlockView(block: g.block, streaming: streaming);
+    }
+    if (g is AgentGroup) {
+      return AgentGroupView(group: g, streaming: streaming);
+    }
+    return const SizedBox.shrink();
+  }
+
   // ---- 输入 / slash / 附件 ----
 
   /// 判断 blocks[i] 是否为一个 AI 输出轮的起点（user 之后的首个 AI 块，或列表首块）。
@@ -447,6 +462,9 @@ class _HomeShellState extends State<HomeShell> {
         copyKinds[i] = _MsgCopy.reply;
       }
     }
+    // 渲染分组：把连续「思考 + 工具」合并为可折叠 AgentGroup；user / text / 孤立 tool
+    // 单独成 SingleBlockGroup。一次构建完所有组，itemBuilder 按 index 取。
+    final groups = buildAgentGroups(blocks);
 
     // 有弹层打开时拦截返回手势：先关最上层弹层，而非直接退出页面（§UX-1.5）。
     return AnimatedBuilder(
@@ -459,7 +477,8 @@ class _HomeShellState extends State<HomeShell> {
         child: child!,
       ),
       child: Scaffold(
-      backgroundColor: AppColors.backgroundOf(context),
+      // 主聊天区使用纯净内容画布；Drawer 仍保留原浅灰背景，形成清晰层级。
+      backgroundColor: AppColors.contentCanvasOf(context),
       drawer: SessionStoreScope(
         store: _store,
         child: SessionArchiveStoreScope(
@@ -524,39 +543,40 @@ class _HomeShellState extends State<HomeShell> {
                               dockH),
                           // 等待首 token（最后一块还是 user）时，标识作为列表尾部占位；
                           // 一旦 AI 块出现，标识渲染在轮起点，不再需要尾部占位。
-                          itemCount: blocks.length +
+                          // 渲染层：先按 buildAgentGroups 把「思考 + 工具」合并成组，
+                          // 每组一个 item；user / text 单独成 SingleBlockGroup。
+                          itemCount: groups.length +
                               (needTailIdentity ? 1 : 0),
                           itemBuilder: (_, i) {
-                            if (i < blocks.length) {
+                            if (i < groups.length) {
+                              final g = groups[i];
+                              final head = g.headIndex;
                               // §3.2-1 AI 身份标识：每轮输出顶部（KimiCore 星形 + 基线名）。
                               // 当前正在输出的轮动态转动，历史轮静止。
                               final curTurn =
                                   running ? _currentTurnStart(blocks) : null;
+                              final isTail = i == groups.length - 1;
                               final children = <Widget>[
-                                if (_atTurnStart(blocks, i))
-                                  _AiIdentityBar(streaming: i == curTurn),
+                                if (_atTurnStart(blocks, head))
+                                  _AiIdentityBar(streaming: head == curTurn),
                                 Padding(
                                   padding: EdgeInsets.only(
-                                      bottom: i == blocks.length - 1
+                                      bottom: isTail
                                           ? 0
-                                          : (copyKinds[i] != _MsgCopy.none
+                                          : (copyKinds[head] != _MsgCopy.none
                                               ? 2.0
                                               : AppSpacing.lg)),
-                                  child: StreamBlockView(
-                                    block: blocks[i],
-                                    streaming: running &&
-                                        i == blocks.length - 1,
-                                  ),
+                                  child: _renderGroup(g, running, isTail),
                                 ),
                               ];
                               // §UX-2.2：按消息维度复制——用户消息复制原文；
                               // AI 回复在回复末块处复制整条回复（流式不显示）。
-                              final cpy = copyKinds[i];
+                              final cpy = copyKinds[head];
                               if (cpy != _MsgCopy.none) {
                                 final text = cpy == _MsgCopy.user
-                                    ? blocks[i].text
+                                    ? blocks[head].text
                                     : conversationText(blocks.sublist(
-                                        _aiRunStart(blocks, i), i + 1));
+                                        _aiRunStart(blocks, head), head + 1));
                                 children.add(const SizedBox(height: 0));
                                 children.add(Row(
                                   mainAxisAlignment: cpy == _MsgCopy.user
@@ -2174,16 +2194,14 @@ class _BottomDock extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // 消息区与 dock 之间的过渡带：原方案用 24px 渐变 [0x00F7F8FA → background]
-        // 想做"消息尾融入画布"的渐隐效果。但 0x00F7F8FA 是 alpha=0 浅灰——浅色下看不见，
-        // 暗色下却被 Skia premultiplied alpha 渲染成可见白条。改成 4px 纯色画布，
-        // 保留一点点呼吸，但不画渐变。明暗自适应。
+        // dock 与主聊天画布同底，不再叠一整块浅灰区域。
+        // 保留 4px 纯色呼吸带，避免恢复会在暗色下产生白条的透明渐变。
         Container(
           height: 4,
-          color: AppColors.backgroundOf(context),
+          color: AppColors.contentCanvasOf(context),
         ),
         Container(
-          color: AppColors.backgroundOf(context),
+          color: AppColors.contentCanvasOf(context),
           padding: EdgeInsets.only(bottom: 12 + mq.padding.bottom),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -2211,7 +2229,12 @@ class _BottomDock extends StatelessWidget {
                       padding: const EdgeInsets.symmetric(
                           horizontal: 13, vertical: 8),
                       decoration: BoxDecoration(
-                        color: AppColors.keyCapOf(context),
+                        // 快捷语句从实心灰 chip 改为画布同色 + 极淡描边，
+                        // 降低 dock 内连续灰色填充的密度。
+                        color: AppColors.contentCanvasOf(context),
+                        border: Border.all(
+                          color: AppColors.hairlineOf(context),
+                        ),
                         borderRadius: BorderRadius.circular(AppRadius.pill),
                       ),
                       alignment: Alignment.center,
@@ -2312,11 +2335,12 @@ class _InputBar extends StatelessWidget {
   });
   @override
   Widget build(BuildContext context) {
-    // 药丸形 composer：去 HuxCard 边框，整块铺 keyCap 浅底（hux 中性柔和，明暗自适应）。
+    // 药丸形 composer：使用主内容专属 quietSurface，而非更重的通用 keyCap；
+    // 保留轮廓和聚焦感，但避免与快捷 chips、画布叠成连续灰块。
     // 三键（+ / send / stop）统一用 Material+InkWell 圆形，与外层药丸视觉对齐。
     return Container(
       decoration: BoxDecoration(
-        color: AppColors.keyCapOf(context),
+        color: AppColors.quietSurfaceOf(context),
         borderRadius: BorderRadius.circular(AppRadius.pill),
       ),
       padding: const EdgeInsets.all(6),
@@ -3128,7 +3152,11 @@ class _SessionTab extends StatelessWidget {
         height: 44, // §UX-10.2-1：触控目标高度合规
         padding: const EdgeInsets.only(left: 12),
         decoration: BoxDecoration(
-          color: selected ? AppColors.accentSoftOf(context) : AppColors.keyCapOf(context),
+          // 多会话区避免整排实心灰胶囊：选中项用轻底，未选中项仅描边。
+          color: selected
+              ? AppColors.quietSurfaceOf(context)
+              : AppColors.contentCanvasOf(context),
+          border: Border.all(color: AppColors.hairlineOf(context)),
           borderRadius: BorderRadius.circular(AppRadius.pill),
         ),
         child: Row(

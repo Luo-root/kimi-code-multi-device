@@ -81,6 +81,102 @@ String conversationText(List<StreamBlock> blocks) {
   return buf.toString().trim();
 }
 
+/// 渲染分组：把连续的「思考 + 工具」块折叠成一个 AgentGroup，
+/// 单块（user / text / 单独 tool）独立成 SingleBlockGroup。
+/// 渲染时 AgentGroup 整体可折叠为「思考 >」，展开后展示思考文本 + 工具列表。
+/// headIndex 是该 group 在原 blocks 列表中的首块索引；home_shell 用它把 group
+/// 倒查回 blocks 索引以计算复制/轮起点。
+sealed class AgentGroupItem {
+  const AgentGroupItem();
+  int get headIndex;
+  List<StreamBlock> get blocks;
+}
+
+class SingleBlockGroup extends AgentGroupItem {
+  final StreamBlock block;
+  @override
+  final int headIndex;
+  const SingleBlockGroup(this.block, {required this.headIndex});
+  @override
+  List<StreamBlock> get blocks => [block];
+}
+
+class AgentGroup extends AgentGroupItem {
+  /// 思考块 + 工具块任意顺序、连续出现（中间无 user/text）就归到同一组。
+  /// 渲染时整组可折叠为一行「思考 + N 个工具」之类的标签，展开后按 parts 顺序
+  /// 展示思考文本与工具行。
+  final List<StreamBlock> parts;
+  @override
+  final int headIndex;
+  AgentGroup(this.parts, {required this.headIndex});
+
+  /// 所有思考块（去斜体的原文段落）。
+  List<StreamBlock> get thinks =>
+      parts.where((p) => p.kind == BlockKind.think).toList();
+  /// 所有工具块。
+  List<StreamBlock> get tools =>
+      parts.where((p) => p.kind == BlockKind.tool).toList();
+  int get thinkCount => thinks.length;
+  int get toolCount => tools.length;
+
+  /// 是否仍在流式追加：任一思考文本为空、任一工具未完成即视为进行中。
+  bool get isRunning {
+    if (thinks.any((t) => t.text.trim().isEmpty)) return true;
+    return tools.any((t) =>
+        t.status == ToolStatus.running ||
+        t.status == ToolStatus.pending);
+  }
+
+  @override
+  List<StreamBlock> get blocks => parts;
+}
+
+/// 把整轮 block 序列按相邻规则分组成 AgentGroupItem。
+/// 规则（v2）：
+/// - think / tool 任意顺序、连续出现都合并进同一个 AgentGroup；
+/// - 遇到 user / text，先关闭当前 AgentGroup（若非空），再开新 SingleBlockGroup。
+/// 这样「思考 + 工具」、「工具 + 思考」、「思考 + 工具 + 思考 + 工具」都会并成一组。
+///
+/// 收尾时若整组只有 1 个 part（单 think 或单 tool），自动降级为 SingleBlockGroup，
+/// 避免出现「思考 › 思考 ›」的双层折叠嵌套——单 part 的 group 与其底层块完全等价。
+List<AgentGroupItem> buildAgentGroups(List<StreamBlock> blocks) {
+  final result = <AgentGroupItem>[];
+  AgentGroup? group;
+
+  for (var i = 0; i < blocks.length; i++) {
+    final b = blocks[i];
+    switch (b.kind) {
+      case BlockKind.think:
+      case BlockKind.tool:
+        final g = group;
+        if (g != null) {
+          g.parts.add(b);
+        } else {
+          group = AgentGroup([b], headIndex: i);
+        }
+      case BlockKind.user:
+      case BlockKind.text:
+        final g = group;
+        if (g != null) {
+          result.add(_finalizeGroup(g));
+          group = null;
+        }
+        result.add(SingleBlockGroup(b, headIndex: i));
+    }
+  }
+  final last = group;
+  if (last != null) result.add(_finalizeGroup(last));
+  return result;
+}
+
+/// 单 part 的 group 退化成 SingleBlockGroup，消除双重折叠标签。
+AgentGroupItem _finalizeGroup(AgentGroup g) {
+  if (g.parts.length == 1) {
+    return SingleBlockGroup(g.parts.first, headIndex: g.headIndex);
+  }
+  return g;
+}
+
 /// 批准请求的一个选项。
 class PermOption {
   final String optionId;
