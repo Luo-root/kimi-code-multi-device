@@ -28,11 +28,12 @@ type rpcMsg struct {
 }
 
 type client struct {
-	stdin  io.WriteCloser
-	cmd    *exec.Cmd
-	mu     sync.Mutex
-	nextID int
-	pend   map[int]chan rpcMsg
+	stdin       io.WriteCloser
+	cmd         *exec.Cmd
+	mu          sync.Mutex
+	nextID      int
+	pend        map[int]chan rpcMsg
+	updateCount int
 }
 
 func spawn() *client {
@@ -84,6 +85,8 @@ func (c *client) readLoop(r io.Reader) {
 			continue
 		}
 		switch {
+		case m.Method == "session/update":
+			c.printUpdateShape(m.Params)
 		case m.Method == "session/request_permission":
 			// 自动批准，让工具真跑，使 wire.jsonl 里有完整的工具调用+结果
 			var p struct {
@@ -119,7 +122,98 @@ func (c *client) readLoop(r io.Reader) {
 		}
 	}
 }
-func (c *client) close() { _ = c.stdin.Close(); _ = c.cmd.Wait() }
+func (c *client) printUpdateShape(params json.RawMessage) {
+	var p struct {
+		SessionID string                 `json:"sessionId"`
+		Update    map[string]interface{} `json:"update"`
+	}
+	if json.Unmarshal(params, &p) != nil || p.Update == nil {
+		return
+	}
+	c.updateCount++
+	u := p.Update
+	kind, _ := u["sessionUpdate"].(string)
+	fmt.Printf("[live %03d] sessionUpdate=%q fields=", c.updateCount, kind)
+	keys := make([]string, 0, len(u))
+	for key := range u {
+		keys = append(keys, key)
+	}
+	for i := 0; i < len(keys); i++ {
+		for j := i + 1; j < len(keys); j++ {
+			if keys[j] < keys[i] {
+				keys[i], keys[j] = keys[j], keys[i]
+			}
+		}
+	}
+	fmt.Print("{")
+	for i, key := range keys {
+		if i > 0 {
+			fmt.Print(", ")
+		}
+		value := u[key]
+		fmt.Printf("%s:%s", key, valueShape(value))
+	}
+	fmt.Println("}")
+}
+
+func valueShape(value interface{}) string {
+	return valueShapeAt(value, 0)
+}
+
+func valueShapeAt(value interface{}, depth int) string {
+	switch v := value.(type) {
+	case nil:
+		return "null"
+	case string:
+		return fmt.Sprintf("string(len=%d)", len(v))
+	case bool:
+		return "bool"
+	case float64:
+		return "number"
+	case []interface{}:
+		if len(v) == 0 || depth >= 2 {
+			return fmt.Sprintf("list(len=%d)", len(v))
+		}
+		return fmt.Sprintf("list(len=%d,item=%s)", len(v), valueShapeAt(v[0], depth+1))
+	case map[string]interface{}:
+		keys := make([]string, 0, len(v))
+		for key := range v {
+			keys = append(keys, key)
+		}
+		for i := 0; i < len(keys); i++ {
+			for j := i + 1; j < len(keys); j++ {
+				if keys[j] < keys[i] {
+					keys[i], keys[j] = keys[j], keys[i]
+				}
+			}
+		}
+		if depth >= 2 {
+			return fmt.Sprintf("map(keys=%s)", strings.Join(keys, "|"))
+		}
+		parts := make([]string, 0, len(keys))
+		for _, key := range keys {
+			parts = append(parts, key+":"+valueShapeAt(v[key], depth+1))
+		}
+		return "map{" + strings.Join(parts, ",") + "}"
+	default:
+		return fmt.Sprintf("%T", value)
+	}
+}
+
+func (c *client) close() {
+	_ = c.stdin.Close()
+	done := make(chan struct{})
+	go func() {
+		_ = c.cmd.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		_ = c.cmd.Process.Kill()
+		<-done
+	}
+}
 
 func main() {
 	home := os.Getenv("KIMI_CODE_HOME")
@@ -147,10 +241,24 @@ func main() {
 		"sessionId": sid,
 		"prompt":    []interface{}{map[string]interface{}{"type": "text", "text": "用一句话介绍你自己"}},
 	})
-	// 一句触发工具（产生 tool_call + tool_result，自动批准）
+	// 触发 Bash、Read 和 Edit，记录真实 session/update 字段形状。
 	c.request("session/prompt", map[string]interface{}{
 		"sessionId": sid,
 		"prompt":    []interface{}{map[string]interface{}{"type": "text", "text": "运行 shell 命令 echo REPLAY_TEST 并把输出告诉我"}},
+	})
+	c.request("session/prompt", map[string]interface{}{
+		"sessionId": sid,
+		"prompt":    []interface{}{map[string]interface{}{"type": "text", "text": "请用 Read 工具读取 probe/replay/main.go 的前 3 行，只汇报读取成功"}},
+	})
+	probeFile := filepath.Join(os.TempDir(), "sentinel-acp-probe.txt")
+	_ = os.WriteFile(probeFile, []byte("before\n"), 0o600)
+	defer os.Remove(probeFile)
+	c.request("session/prompt", map[string]interface{}{
+		"sessionId": sid,
+		"prompt": []interface{}{map[string]interface{}{
+			"type": "text",
+			"text": "请用 Edit 工具把文件 " + probeFile + " 中的 before 精确替换为 after，只执行一次编辑并汇报成功",
+		}},
 	})
 	time.Sleep(1 * time.Second)
 	c.close() // 关闭让 wire.jsonl flush 落盘
@@ -191,29 +299,33 @@ func main() {
 		sc := bufio.NewScanner(f)
 		sc.Buffer(make([]byte, 1024*1024), 1024*1024)
 		n := 0
-		for i := 0; sc.Scan(); i++ {
+		for sc.Scan() {
 			n++
-			if i < 40 {
-				line := sc.Text()
-				if len(line) > 320 {
-					line = line[:320] + "…"
-				}
-				fmt.Printf("  [%d] %s\n", i+1, line)
+			var item map[string]interface{}
+			if json.Unmarshal(sc.Bytes(), &item) != nil {
+				fmt.Printf("  [%d] invalid_json\n", n)
+				continue
+			}
+			event, _ := item["event"].(map[string]interface{})
+			eventType, _ := event["type"].(string)
+			if n <= 15 || eventType == "tool.call" || eventType == "tool.result" {
+				fmt.Printf("  [%d] %s\n", n, valueShape(item))
 			}
 		}
 		f.Close()
-		fmt.Printf(">>> wire.jsonl 共 %d 行（上面打印前 40 行）\n", n)
+		fmt.Printf(">>> wire.jsonl 共 %d 行（仅打印 schema，不打印正文）\n", n)
 	}
 
-	fmt.Println("\n========== state.json（元数据）==========")
+	fmt.Println("\n========== state.json（元数据 schema）==========")
 	if statePath == "" {
 		fmt.Println(">>> 没找到 state.json")
 	} else {
 		b, _ := os.ReadFile(statePath)
-		s := string(b)
-		if len(s) > 2500 {
-			s = s[:2500] + "…"
+		var state map[string]interface{}
+		if json.Unmarshal(b, &state) != nil {
+			fmt.Println(">>> state.json 不是合法 JSON")
+		} else {
+			fmt.Println(valueShape(state))
 		}
-		fmt.Println(s)
 	}
 }

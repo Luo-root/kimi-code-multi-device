@@ -577,9 +577,13 @@ func (r *Relay) handleUp(c *client, data []byte) {
 	case UpCancel:
 		sid := e.SessionID
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			_, _ = r.acp.Request(ctx, "session/cancel", map[string]any{"sessionId": sid})
+			// session/cancel 是 ACP notification（无 id）；带 id 的 request 形式会被
+			// kimi 拒为 -32601 Method not found（实测 0.32.0，二进制内嵌 SDK 注释证实）。
+			// notification 形式立即中断当前轮：prompt 以 stopReason=cancelled 返回，
+			// busy 随 prompt goroutine 自然复位，会话可继续使用（均已实测）。
+			if err := r.acp.Notify("session/cancel", map[string]any{"sessionId": sid}); err != nil {
+				r.sendErr(sid, "cancel: "+err.Error())
+			}
 		}()
 	case UpSetMode:
 		var s UpSetModePayload

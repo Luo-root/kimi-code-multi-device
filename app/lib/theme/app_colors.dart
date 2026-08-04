@@ -89,4 +89,42 @@ abstract final class AppColors {
   static Color accentSoftOf(BuildContext c) => _isDark(c)
       ? HuxColors.white.withValues(alpha: 0.12)
       : const Color(0x1A1D1D1F);
+
+  /// 思考/工具详情使用的「雾面」底色，比普通 surface 再退一级。
+  /// 只承载结构，不与主要回复争夺视觉焦点。
+  static Color detailSurfaceOf(BuildContext c) => _isDark(c)
+      ? HuxColors.white.withValues(alpha: 0.035)
+      : const Color(0xFFF8F9FA);
+
+  /// 思考/工具详情的轻边框与分隔线。
+  static Color detailHairlineOf(BuildContext c) => _isDark(c)
+      ? HuxColors.white.withValues(alpha: 0.09)
+      : const Color(0xFFE7E9EC);
+
+  /// 辅助标签文字：比正文更弱，但仍保持可读。
+  static Color detailLabelOf(BuildContext c) => _isDark(c)
+      ? HuxColors.white.withValues(alpha: 0.48)
+      : const Color(0xFF8B8F96);
+
+  /// Edit diff 的低对比度语义底色。正文色保持正常对比度，避免只靠颜色传达含义。
+  static Color diffAddedBgOf(BuildContext c) => _isDark(c)
+      ? approve.withValues(alpha: 0.12)
+      : approve.withValues(alpha: 0.08);
+
+  static Color diffRemovedBgOf(BuildContext c) => _isDark(c)
+      ? reject.withValues(alpha: 0.12)
+      : reject.withValues(alpha: 0.08);
+
+  static Color diffModifiedBgOf(BuildContext c) => _isDark(c)
+      ? warning.withValues(alpha: 0.12)
+      : warning.withValues(alpha: 0.08);
+
+  static Color diffAddedMarkOf(BuildContext c) =>
+      _isDark(c) ? const Color(0xFF8AD89A) : const Color(0xFF2F8F46);
+
+  static Color diffRemovedMarkOf(BuildContext c) =>
+      _isDark(c) ? const Color(0xFFFFA39D) : const Color(0xFFC03932);
+
+  static Color diffModifiedMarkOf(BuildContext c) =>
+      _isDark(c) ? const Color(0xFFFFC66D) : const Color(0xFF9A6500);
 }

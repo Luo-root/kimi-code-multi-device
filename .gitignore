@@ -33,3 +33,5 @@ mcp.local.json
 
 # ---- 探针临时产物 ----
 probe/*.log
+# ---- 工具目录 ----
+.workbuddy/

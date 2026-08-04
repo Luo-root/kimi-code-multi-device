@@ -1,6 +1,8 @@
 import 'package:flutter/widgets.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 
+import '../relay/models.dart' show looksLikeEditTitle;
+
 /// SENTINEL 图标令牌。全部 Lucide 线性图标，绝不用 emoji。
 abstract final class AppIcons {
   // 导航 / 全局
@@ -49,26 +51,24 @@ abstract final class AppIcons {
   /// 工具名 → 列表行图标。
   /// AgentGroup 展开后按工具类型用不同图标展示（不只是 terminal）。
   static IconData iconForTool(String? name) {
-    switch (name) {
-      case 'Read':
-        return file; // file_text — 阅读文件
-      case 'Write':
-      case 'Edit':
-        return pencil; // 写入/编辑
-      case 'Bash':
-      case 'KillBash':
-        return terminal;
-      case 'Grep':
-      case 'Glob':
-      case 'WebSearch':
-        return search;
-      case 'WebFetch':
-        return globe;
-      case 'TodoWrite':
-        return listTodo;
-      default:
-        return terminal;
+    if (name == 'Read') return file;
+    if (name == 'Write' || name == 'Edit') return pencil;
+    final lower = name?.toLowerCase();
+    if (lower == 'bash' ||
+        lower == 'killbash' ||
+        lower == 'terminal' ||
+        lower == 'shell' ||
+        lower == 'sh' ||
+        lower == 'zsh') {
+      return terminal;
     }
+    if (lower == 'grep' || lower == 'glob' || lower == 'websearch') {
+      return search;
+    }
+    if (lower == 'webfetch') return globe;
+    if (lower == 'todowrite') return listTodo;
+    if (looksLikeEditTitle(name)) return pencil;
+    return terminal;
   }
 
   // 批准卡

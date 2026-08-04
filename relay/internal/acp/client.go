@@ -153,6 +153,17 @@ func (c *Client) Respond(id json.RawMessage, result any) error {
 	return c.send(rpcMsg{JSONRPC: "2.0", ID: id, Result: r})
 }
 
+// Notify 发一条无 id 的 notification（如 session/cancel），不等待响应。
+// 注意：notification 不能带 id——ACP 的 session/cancel 是 notification，
+// 带 id 的 request 形式会被 kimi 拒为 -32601 Method not found（实测 0.32.0）。
+func (c *Client) Notify(method string, params any) error {
+	var p json.RawMessage
+	if params != nil {
+		p, _ = json.Marshal(params)
+	}
+	return c.send(rpcMsg{JSONRPC: "2.0", Method: method, Params: p})
+}
+
 // Restart 关闭当前 kimi 进程并重新 spawn（同步：返回时新进程已起，但未 initialize）。
 // 关键：先 gen+1，使旧 readLoop 退出时 myGen != 当前 gen，从而不触发 OnExit。
 func (c *Client) Restart() error {
