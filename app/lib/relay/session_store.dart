@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'models.dart';
 
@@ -25,6 +27,16 @@ class SessionStore extends ChangeNotifier {
 
   /// 该会话是否在跑（AI 还没输出完）——驱动「停」可见性与 running 状态点。
   bool busyOf(String? sid) => sid != null && _busy[sid] == true;
+
+  /// 本地发送/取消时的即时状态更新。
+  ///
+  /// 中继随后仍会下发权威的 `session.busy` 覆盖它；这里仅用于消除
+  /// prompt 发出到 busy 事件到达之间的 UI 空窗，避免 stop 按钮晚出现。
+  void setBusy(String sid, bool busy) {
+    if (_busy[sid] == busy) return;
+    _busy[sid] = busy;
+    notifyListeners();
+  }
 
   List<SessionMeta> get history => List.unmodifiable(_history);
 
@@ -92,12 +104,13 @@ class SessionStore extends ChangeNotifier {
   }
 
   /// 全部待批准总数（跨会话）。角标用它。
-  int get pendingCount =>
-      _pending.values.fold(0, (n, q) => n + q.length);
+  int get pendingCount => _pending.values.fold(0, (n, q) => n + q.length);
 
   /// 有待批准的会话 sid 集合。切换器🟠用它。
-  Set<String> get pendingSids =>
-      _pending.entries.where((e) => e.value.isNotEmpty).map((e) => e.key).toSet();
+  Set<String> get pendingSids => _pending.entries
+      .where((e) => e.value.isNotEmpty)
+      .map((e) => e.key)
+      .toSet();
 
   /// 全部待批准（供队列视图按 sid 分组）。
   Map<String, List<PermissionRequest>> get allPending =>
@@ -155,9 +168,14 @@ class SessionStore extends ChangeNotifier {
       case 'session.list':
         _history
           ..clear()
-          ..addAll(((payload['sessions'] as List?) ?? [])
-              .map((j) => SessionMeta.fromJson((j as Map).cast<String, dynamic>()))
-              .toList());
+          ..addAll(
+            ((payload['sessions'] as List?) ?? [])
+                .map(
+                  (j) =>
+                      SessionMeta.fromJson((j as Map).cast<String, dynamic>()),
+                )
+                .toList(),
+          );
         notifyListeners();
       case 'session.history':
         // 历史回放：用中继解析好的 blocks 重建该 sid 的流。
@@ -224,20 +242,40 @@ class SessionStore extends ChangeNotifier {
           blocks.add(StreamBlock.text(t));
         }
       case 'tool_call':
-        blocks.add(StreamBlock.tool(
-          toolCallId: u['toolCallId']?.toString(),
-          name: u['title']?.toString(),
-          command: extractToolText(u),
-        ));
+        blocks.add(
+          StreamBlock.tool(
+            toolCallId: u['toolCallId']?.toString(),
+            name: u['title']?.toString(),
+            command: extractToolText(u),
+          ),
+        );
       case 'tool_call_update':
         final id = u['toolCallId']?.toString();
         final blk = _findTool(blocks, id);
         if (blk == null) break;
         blk.status = _status(u['status']?.toString());
-        // 命令：rawInput.command 在命令流完后出现（结构化、最准）。
-        final rawIn = (u['rawInput'] as Map?)?.cast<String, dynamic>();
-        if (rawIn != null && rawIn['command'] != null) {
-          blk.command = rawIn['command'].toString();
+        // 输入：Bash 优先 rawInput.command；Edit 等结构化工具保留完整 JSON，
+        // 让历史与完成态都能重建行级 diff 和变更摘要。
+        final rawInAny = u['rawInput'];
+        if (rawInAny is String && rawInAny.trim().startsWith('{')) {
+          blk.command = rawInAny;
+        } else if (rawInAny is Map) {
+          final rawIn = rawInAny.cast<String, dynamic>();
+          if (rawIn['command'] is String) {
+            blk.command = rawIn['command'].toString();
+          } else if (looksLikeEditInput(rawIn) ||
+              looksLikeEditTitle(blk.toolName)) {
+            blk.command = _encodeToolInput(rawIn);
+          }
+        }
+        // Kimi ACP 的 in_progress content.text 是「工具参数 JSON 的累积快照」，
+        // 不是输出也不是 delta。rawInput 往往只在完成态出现，Edit 必须在这里
+        // 先保存完整 JSON；否则完成后只剩 rawOutput 的 "Replaced ..."，无法构造 diff。
+        final contentSnapshot = _toolInputSnapshot(u);
+        if (contentSnapshot != null &&
+            (looksLikeEditTitle(blk.toolName) ||
+                _looksLikeEditJson(contentSnapshot))) {
+          blk.command = contentSnapshot;
         }
         // 兜底：in_progress 带 "Running: xxx" 标题时，截出命令预览。
         if (blk.command == null || blk.command!.isEmpty) {
@@ -251,8 +289,8 @@ class SessionStore extends ChangeNotifier {
         if (u['rawOutput'] != null) {
           blk.output = u['rawOutput'].toString();
         }
-        // 关键：in_progress 的 content.text 是「命令 JSON 的累积快照」，
-        // 不是增量 delta——绝不追加、也不显示，那是协议层流式细节。
+      // 关键：in_progress 的 content.text 是「命令 JSON 的累积快照」，
+      // 不是增量 delta——绝不追加、也不显示，那是协议层流式细节。
       case 'config_option_update':
         _configs[sid] = u['configOptions'];
       case 'available_commands_update':
@@ -323,6 +361,53 @@ class SessionStore extends ChangeNotifier {
     return c?['text']?.toString() ?? '';
   }
 
+  String _encodeToolInput(Map<String, dynamic> value) {
+    try {
+      return jsonEncode(value);
+    } catch (_) {
+      return value.toString();
+    }
+  }
+
+  /// tool_call_update.content 可能是 `{type:text,text:<累计 JSON>}`，也可能
+  /// 是 ACP content-block 数组。只返回完整可解析的 JSON 快照，绝不拼接 delta。
+  String? _toolInputSnapshot(Map<String, dynamic> update) {
+    final content = update['content'];
+    String? text;
+    if (content is Map) {
+      text = content['text']?.toString();
+    } else if (content is List) {
+      final buffer = StringBuffer();
+      for (final item in content) {
+        if (item is! Map) continue;
+        final inner = item['content'];
+        final part = inner is Map
+            ? inner['text']?.toString()
+            : item['text']?.toString();
+        if (part != null) buffer.write(part);
+      }
+      if (buffer.isNotEmpty) text = buffer.toString();
+    }
+    final trimmed = text?.trim();
+    if (trimmed == null || trimmed.isEmpty || !trimmed.startsWith('{')) {
+      return null;
+    }
+    try {
+      final decoded = jsonDecode(trimmed);
+      return decoded is Map ? trimmed : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  bool _looksLikeEditJson(String source) {
+    try {
+      return looksLikeEditInput(jsonDecode(source));
+    } catch (_) {
+      return false;
+    }
+  }
+
   ToolStatus _status(String? s) {
     switch (s) {
       case 'in_progress':
@@ -331,6 +416,10 @@ class SessionStore extends ChangeNotifier {
         return ToolStatus.done;
       case 'failed':
         return ToolStatus.failed;
+      case 'cancelled':
+      case 'canceled':
+      case 'cancel':
+        return ToolStatus.cancelled;
       default:
         return ToolStatus.pending;
     }

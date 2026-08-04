@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:hux/hux.dart';
 import 'package:flutter/services.dart';
 import '../relay/models.dart';
@@ -24,6 +25,12 @@ const _kDefaultRelayUrl = 'ws://127.0.0.1:7331/ws';
 
 // 实测基线（设置页"关于"与 AI 身份标识共用同一值）。
 const _kTestedBaseline = 'Kimi Code CLI 0.31.0';
+
+// Composer 尺寸策略：单行保持紧凑，最多扩展到 6 行；超过后由 TextField
+// 自己滚动，不再继续撑高 dock。行高来自 AppText.body（15px / 1.6）。
+const _kComposerMinLines = 1;
+const _kComposerMaxLines = 6;
+const _kComposerVerticalPadding = 8.0;
 
 // chip = 你的自由文本常用语（点选即发）；slash = Kimi 命令（来自 available_commands）。
 const _chips = ['跑下测试', 'commit 一下', '解释刚干了啥'];
@@ -79,6 +86,26 @@ String _cfgCur(dynamic cfg, String id) {
   return '';
 }
 
+/// 找到当前滚动位置之前最近一条已测量的用户消息。
+@visibleForTesting
+int? latestUserHeadBeforeOffset(
+  List<AgentGroupItem> groups,
+  double offset,
+  double? Function(int headIndex) offsetOf,
+) {
+  int? first;
+  int? latest;
+  for (final group in groups) {
+    if (group.blocks.first.kind != BlockKind.user) continue;
+    final head = group.headIndex;
+    final messageOffset = offsetOf(head);
+    if (messageOffset == null) continue;
+    first ??= head;
+    if (messageOffset <= offset + 8) latest = head;
+  }
+  return latest ?? first;
+}
+
 // ---------- 主页 ----------
 
 class HomeShell extends StatefulWidget {
@@ -95,15 +122,27 @@ class _HomeShellState extends State<HomeShell> {
   final _inputCtrl = TextEditingController();
   final _scrollCtrl = ScrollController();
   final _dockKey = GlobalKey();
+  final _groupKeys = <int, GlobalKey>{};
+  final _userOffsets = <int, double>{};
 
   /// 用户是否在列表底部附近：非底部时新消息不应把视口拽回（§UX 防滚动劫持）。
   bool _atBottom = true;
+  /// 最近一次用户滚动方向：向上时跳用户消息，向下时回到底部。
+  ScrollDirection _scrollDirection = ScrollDirection.reverse;
   /// §UX-4.2：不在底部时累计的新消息数（驱动 FAB 角标）。
   int _newWhileAway = 0;
   int _lastBlockCount = 0;
   String? _lastSid;
   /// 底部 dock 真实高度（动态测量，替代写死的 360/230/150）。
   double _dockH = 150;
+
+  // 输入框会在每次换行/自动折行时改变 dock 高度；尺寸通知负责把
+  // 列表底部留白和滚动导航的锚点同步到新的真实高度。
+  void _scheduleDockMeasure() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _measureDock();
+    });
+  }
 
   String _relayUrl = _kDefaultRelayUrl;
   String _effortId = 'medium'; // 占位
@@ -130,9 +169,59 @@ class _HomeShellState extends State<HomeShell> {
     final pos = _scrollCtrl.position;
     final atBottom = pos.pixels >= pos.maxScrollExtent - 60;
     if (atBottom != _atBottom) {
-      _atBottom = atBottom;
-      // 回到底部时清零新消息角标。
-      if (atBottom && _newWhileAway != 0) _newWhileAway = 0;
+      setState(() {
+        _atBottom = atBottom;
+        // 回到底部时清零新消息角标。
+        if (atBottom && _newWhileAway != 0) _newWhileAway = 0;
+      });
+    }
+  }
+
+  bool _onUserScroll(UserScrollNotification notification) {
+    if (notification.direction != ScrollDirection.idle &&
+        notification.direction != _scrollDirection) {
+      setState(() => _scrollDirection = notification.direction);
+    }
+    return false;
+  }
+
+  void _scrollToBottom() {
+    if (!_scrollCtrl.hasClients) return;
+    _scrollCtrl.animateTo(
+      _scrollCtrl.position.maxScrollExtent,
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  Future<void> _scrollToLatestUser(List<AgentGroupItem> groups) async {
+    if (!_scrollCtrl.hasClients) return;
+    final targetHead = latestUserHeadBeforeOffset(
+      groups,
+      _scrollCtrl.offset,
+      (headIndex) => _userOffsets[headIndex],
+    );
+    if (targetHead == null) return;
+    final ctx = _groupKeys[targetHead]?.currentContext;
+    if (ctx != null) {
+      await Scrollable.ensureVisible(
+        ctx,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+        alignment: 0.08,
+      );
+      return;
+    }
+    final targetOffset = _userOffsets[targetHead];
+    if (targetOffset != null) {
+      await _scrollCtrl.animateTo(
+        targetOffset.clamp(
+          _scrollCtrl.position.minScrollExtent,
+          _scrollCtrl.position.maxScrollExtent,
+        ),
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+      );
     }
   }
 
@@ -191,7 +280,10 @@ class _HomeShellState extends State<HomeShell> {
 
   void _cancelCurrent() {
     final sid = _store.currentSid;
-    if (sid == null) return;
+    if (sid == null || !_store.busyOf(sid)) return;
+    // relay 的上行协议就是 `cancel` + sessionId；中继负责调用
+    // ACP `session/cancel`。先收起 stop，随后由 session.busy 权威事件校正。
+    _store.setBusy(sid, false);
     _client.send('cancel', sid: sid);
   }
 
@@ -259,6 +351,9 @@ class _HomeShellState extends State<HomeShell> {
       return;
     }
     _store.addUser(sid, t);
+    // prompt 已经写入 WS 后立即进入 running，避免 relay 的 busy 广播
+    // 与当前帧之间出现 send 按钮仍可见、无法中断的空窗。
+    _store.setBusy(sid, true);
     _client.send('prompt', sid: sid, payload: {'text': t});
     HapticFeedback.lightImpact(); // §UX-8.2-2：发送 = .light。
     _inputCtrl.clear();
@@ -534,7 +629,9 @@ class _HomeShellState extends State<HomeShell> {
                 children: [
                   blocks.isEmpty
                       ? _EmptyState(online: _store.relayState == 'ok')
-                      : ListView.builder(
+                      : NotificationListener<UserScrollNotification>(
+                          onNotification: _onUserScroll,
+                          child: ListView.builder(
                           controller: _scrollCtrl,
                           padding: EdgeInsets.fromLTRB(
                               AppSpacing.pageMargin,
@@ -587,16 +684,28 @@ class _HomeShellState extends State<HomeShell> {
                                   ],
                                 ));
                               }
-                              return Column(
+                              final child = Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: children,
                               );
+                              final key = _groupKeys.putIfAbsent(
+                                  head, () => GlobalKey());
+                              return g.blocks.first.kind == BlockKind.user
+                                  ? _UserMessageAnchor(
+                                      key: key,
+                                      scrollController: _scrollCtrl,
+                                      onPosition: (offset) =>
+                                          _userOffsets[head] = offset,
+                                      child: child,
+                                    )
+                                  : KeyedSubtree(key: key, child: child);
                             }
                             // 发送后等待首 token：AI 块还没出现，标识在 user 下方、
                             // 即"即将输出内容的最上面"，动态转动。
                             return _AiIdentityBar(streaming: true);
                           },
                         ),
+                      ),
                   // §3.2-4 全局生成状态条：busy 全程 2px indeterminate 进度，输出完收起。
                   if (running)
                     Positioned(
@@ -609,47 +718,57 @@ class _HomeShellState extends State<HomeShell> {
                         minHeight: 2,
                       ),
                     ),
-                  // §UX-4.2：上滑后浮现「回到底部」FAB，有新消息时带角标。
+                  // 双行为导航：向下滚时回到底部；向上滚时回最近一条用户对话。
                   if (!_atBottom && blocks.isNotEmpty)
                     Positioned(
-                      right: AppSpacing.pageMargin,
-                      bottom: 8,
-                      child: _ScrollBottomFab(
-                        newCount: _newWhileAway,
-                        onTap: () {
-                          _atBottom = true;
-                          _newWhileAway = 0;
-                          setState(() {});
-                          if (_scrollCtrl.hasClients) {
-                            _scrollCtrl.animateTo(
-                              _scrollCtrl.position.maxScrollExtent,
-                              duration: const Duration(milliseconds: 300),
-                              curve: Curves.easeOut,
-                            );
-                          }
-                        },
+                      left: 0,
+                      right: 0,
+                      bottom: dockH + 12,
+                      child: Center(
+                        child: _ScrollJumpFab(
+                          direction: _scrollDirection,
+                          newCount: _newWhileAway,
+                          onTap: () {
+                            if (_scrollDirection == ScrollDirection.forward) {
+                              _scrollToLatestUser(groups);
+                            } else {
+                              _atBottom = true;
+                              _newWhileAway = 0;
+                              setState(() {});
+                              _scrollToBottom();
+                            }
+                          },
+                        ),
                       ),
                     ),
                   Positioned(
                     left: 0,
                     right: 0,
                     bottom: 0,
-                    child: Container(
-                      key: _dockKey,
-                      child: _BottomDock(
-                        enabled: _store.relayState == 'ok' && sid != null,
-                        running: running,
-                        pending: perm,
-                        controller: _inputCtrl,
-                        onSend: _send,
-                        onStop: _cancelCurrent,
-                        onChanged: _onInputChanged,
-                        onOpenPlus: _onAttach,
-                        onChip: _send,
-                        slashOpen: slashOpen && slashOpts.isNotEmpty,
-                        slashOpts: slashOpts,
-                        onPickSlash: _pickSlash,
-                        onDecide: _decide,
+                    child: NotificationListener<SizeChangedLayoutNotification>(
+                      onNotification: (_) {
+                        _scheduleDockMeasure();
+                        return false;
+                      },
+                      child: SizeChangedLayoutNotifier(
+                        child: Container(
+                          key: _dockKey,
+                          child: _BottomDock(
+                            enabled: _store.relayState == 'ok' && sid != null,
+                            running: running,
+                            pending: perm,
+                            controller: _inputCtrl,
+                            onSend: _send,
+                            onStop: _cancelCurrent,
+                            onChanged: _onInputChanged,
+                            onOpenPlus: _onAttach,
+                            onChip: _send,
+                            slashOpen: slashOpen && slashOpts.isNotEmpty,
+                            slashOpts: slashOpts,
+                            onPickSlash: _pickSlash,
+                            onDecide: _decide,
+                          ),
+                        ),
                       ),
                     ),
                   ),
@@ -2088,52 +2207,99 @@ class _DotMatrix extends StatelessWidget {
   }
 }
 
-// ---------- 回到底部 FAB（§UX-4.2）----------
+// ---------- 双行为滚动导航 FAB ----------
 
-/// 上滑后浮现的圆形回底按钮，有新消息时带数字角标。
-class _ScrollBottomFab extends StatelessWidget {
-  final int newCount;
-  final VoidCallback onTap;
-  const _ScrollBottomFab({required this.newCount, required this.onTap});
+class _UserMessageAnchor extends StatefulWidget {
+  final ScrollController scrollController;
+  final ValueChanged<double> onPosition;
+  final Widget child;
+  const _UserMessageAnchor({
+    super.key,
+    required this.scrollController,
+    required this.onPosition,
+    required this.child,
+  });
+
+  @override
+  State<_UserMessageAnchor> createState() => _UserMessageAnchorState();
+}
+
+class _UserMessageAnchorState extends State<_UserMessageAnchor> {
+  void _reportPosition() {
+    if (!mounted || !widget.scrollController.hasClients) return;
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return;
+    widget.onPosition(
+        box.localToGlobal(Offset.zero).dy + widget.scrollController.offset);
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Pressable(
-      onTap: onTap,
-      child: Container(
-        width: 44,
-        height: 44,
-        decoration: BoxDecoration(
-          color: AppColors.surfaceOf(context),
-          shape: BoxShape.circle,
-          boxShadow: AppShadows.popup,
-        ),
-        child: Stack(
-          alignment: Alignment.center,
-          children: [
-            Icon(AppIcons.chevronDown,
-                size: 18, color: AppColors.textPrimaryOf(context)),
-            if (newCount > 0)
-              Positioned(
-                top: 2,
-                right: 2,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 5, vertical: 1),
-                  decoration: BoxDecoration(
-                    color: AppColors.accentOf(context),
-                    borderRadius: BorderRadius.circular(AppRadius.pill),
-                  ),
-                  constraints: const BoxConstraints(minWidth: 16),
-                  child: Text(
-                    newCount > 99 ? '99+' : '$newCount',
-                    textAlign: TextAlign.center,
-                    style: AppText.monoCaption.copyWith(
-                        color: AppColors.surfaceOf(context), fontSize: 9),
+    WidgetsBinding.instance.addPostFrameCallback((_) => _reportPosition());
+    return widget.child;
+  }
+}
+
+/// 屏幕中心底部的滚动导航：向下滚时回到底部，向上滚时回最近一条用户对话。
+class _ScrollJumpFab extends StatelessWidget {
+  final ScrollDirection direction;
+  final int newCount;
+  final VoidCallback onTap;
+  const _ScrollJumpFab({
+    required this.direction,
+    required this.newCount,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final toUser = direction == ScrollDirection.forward;
+    return Semantics(
+      button: true,
+      label: toUser ? '回到最近一条用户对话' : '回到底部',
+      child: Pressable(
+        onTap: onTap,
+        child: Container(
+          width: 44,
+          height: 44,
+          decoration: BoxDecoration(
+            color: AppColors.surfaceOf(context),
+            shape: BoxShape.circle,
+            border: Border.all(color: AppColors.hairlineOf(context)),
+            boxShadow: AppShadows.popup,
+          ),
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              AnimatedRotation(
+                turns: toUser ? 0.5 : 0,
+                duration: const Duration(milliseconds: 140),
+                curve: Curves.easeOutCubic,
+                child: Icon(AppIcons.chevronDown,
+                    size: 20, color: AppColors.textPrimaryOf(context)),
+              ),
+              if (!toUser && newCount > 0)
+                Positioned(
+                  top: 2,
+                  right: 2,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 5, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: AppColors.accentOf(context),
+                      borderRadius: BorderRadius.circular(AppRadius.pill),
+                    ),
+                    constraints: const BoxConstraints(minWidth: 16),
+                    child: Text(
+                      newCount > 99 ? '99+' : '$newCount',
+                      textAlign: TextAlign.center,
+                      style: AppText.monoCaption.copyWith(
+                          color: AppColors.surfaceOf(context), fontSize: 9),
+                    ),
                   ),
                 ),
-              ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -2255,7 +2421,7 @@ class _BottomDock extends StatelessWidget {
               Padding(
                 padding:
                     const EdgeInsets.symmetric(horizontal: AppSpacing.pageMargin),
-                child: _InputBar(
+                child: ComposerInputBar(
                   enabled: enabled,
                   running: running,
                   controller: controller,
@@ -2316,7 +2482,7 @@ class _SlashPanel extends StatelessWidget {
   }
 }
 
-class _InputBar extends StatelessWidget {
+class ComposerInputBar extends StatelessWidget {
   final bool enabled;
   final bool running;
   final TextEditingController controller;
@@ -2324,7 +2490,8 @@ class _InputBar extends StatelessWidget {
   final VoidCallback onStop;
   final ValueChanged<String> onChanged;
   final VoidCallback onOpenPlus;
-  const _InputBar({
+  const ComposerInputBar({
+    super.key,
     required this.enabled,
     required this.running,
     required this.controller,
@@ -2335,19 +2502,50 @@ class _InputBar extends StatelessWidget {
   });
   @override
   Widget build(BuildContext context) {
+    void submitFromKeyboard() {
+      if (running) return;
+      final value = controller.value;
+      // 中文输入法正在组合候选词时，Enter 是确认候选，不应发送消息。
+      if (value.composing.isValid && !value.composing.isCollapsed) return;
+      onSend(value.text);
+    }
+
+    void insertNewline() {
+      final value = controller.value;
+      // Shift+Enter 在输入法组合态下交给 IME，避免破坏候选词。
+      if (value.composing.isValid && !value.composing.isCollapsed) return;
+      final selection = value.selection.isValid
+          ? value.selection
+          : TextSelection.collapsed(offset: value.text.length);
+      final start = selection.start;
+      final end = selection.end;
+      final text = value.text.replaceRange(start, end, '\\n');
+      controller.value = value.copyWith(
+        text: text,
+        selection: TextSelection.collapsed(offset: start + 1),
+        composing: TextRange.empty,
+      );
+      onChanged(text);
+    }
+
     // 药丸形 composer：使用主内容专属 quietSurface，而非更重的通用 keyCap；
     // 保留轮廓和聚焦感，但避免与快捷 chips、画布叠成连续灰块。
     // 三键（+ / send / stop）统一用 Material+InkWell 圆形，与外层药丸视觉对齐。
     return Container(
+      key: const ValueKey('composer-bar'),
       decoration: BoxDecoration(
         color: AppColors.quietSurfaceOf(context),
-        borderRadius: BorderRadius.circular(AppRadius.pill),
+        // 不能使用 pill：多行时会把圆角半径固定到高度的一半，
+        // 看起来始终像椭圆。固定卡片圆角后，内容增高会自然变成长方形。
+        borderRadius: BorderRadius.circular(AppRadius.card),
+        border: Border.all(color: AppColors.hairlineOf(context)),
       ),
       padding: const EdgeInsets.all(6),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           _circleIconBtn(
+            key: const ValueKey('composer-plus'),
             bg: AppColors.surfaceOf(context),
             icon: AppIcons.plus,
             iconColor: AppColors.textPrimaryOf(context),
@@ -2355,13 +2553,20 @@ class _InputBar extends StatelessWidget {
           ),
           const SizedBox(width: AppSpacing.sm),
           Expanded(
-            child: TextField(
-              controller: controller,
+            child: CallbackShortcuts(
+              bindings: <ShortcutActivator, VoidCallback>{
+                SingleActivator(LogicalKeyboardKey.enter, shift: true):
+                    insertNewline,
+                SingleActivator(LogicalKeyboardKey.enter): submitFromKeyboard,
+              },
+              child: TextField(
+                controller: controller,
               enabled: enabled,
               style: AppText.body,
-              // 多行：写代码/长指令不被压成一行；Enter 发送，Shift+Enter 换行。
-              minLines: 1,
-              maxLines: 6,
+              key: const ValueKey('composer-input'),
+              // 多行：写代码/长指令不被压成一行；达到 6 行后仅在输入区内滚动。
+              minLines: _kComposerMinLines,
+              maxLines: _kComposerMaxLines,
               keyboardType: TextInputType.multiline,
               textInputAction: TextInputAction.send,
               // 代码 agent：关闭自动纠错/自动大写，避免被改词。
@@ -2369,6 +2574,8 @@ class _InputBar extends StatelessWidget {
               enableSuggestions: false,
               textCapitalization: TextCapitalization.none,
               onChanged: onChanged,
+              // 移动端软键盘的发送 action 仍走 onSubmitted；桌面端的
+              // Enter/Shift+Enter 通过 Shortcuts 在 TextField 外显式分流。
               onSubmitted: onSend,
               decoration: InputDecoration(
                 isCollapsed: true,
@@ -2382,7 +2589,10 @@ class _InputBar extends StatelessWidget {
                 focusedErrorBorder: InputBorder.none,
                 hintText: enabled ? '尽管问…' : '先连接中继',
                 hintStyle: AppText.placeholder,
-                contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                contentPadding: const EdgeInsets.symmetric(
+                  vertical: _kComposerVerticalPadding,
+                ),
+                ),
               ),
             ),
           ),
@@ -2390,6 +2600,7 @@ class _InputBar extends StatelessWidget {
           // §13「停」可见性随状态：流式中亮且显眼（圆 + reject 红），空闲时是发送（圆 + 黑）。
           if (running)
             _circleIconBtn(
+              key: const ValueKey('composer-stop'),
               bg: AppColors.reject,
               icon: AppIcons.stop,
               iconColor: AppColors.surfaceOf(context),
@@ -2397,6 +2608,7 @@ class _InputBar extends StatelessWidget {
             )
           else
             _circleIconBtn(
+              key: const ValueKey('composer-send'),
               bg: AppColors.textPrimaryOf(context),
               icon: AppIcons.send,
               iconColor: AppColors.surfaceOf(context),
@@ -2410,6 +2622,7 @@ class _InputBar extends StatelessWidget {
   /// 36×36 圆形图标按钮：与 + 按钮共用同一形状，三键视觉对齐。
   /// disabled 时整体 0.45 透明，比换灰底色更克制、不抢焦点。
   Widget _circleIconBtn({
+    Key? key,
     required Color bg,
     required IconData icon,
     required Color iconColor,
@@ -2418,6 +2631,7 @@ class _InputBar extends StatelessWidget {
     final isEnabled = onTap != null;
     return Opacity(
       opacity: isEnabled ? 1.0 : 0.45,
+      key: key,
       child: Material(
         color: bg,
         shape: const CircleBorder(),
@@ -3150,13 +3364,17 @@ class _SessionTab extends StatelessWidget {
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
         height: 44, // §UX-10.2-1：触控目标高度合规
-        padding: const EdgeInsets.only(left: 12),
+        padding: const EdgeInsets.only(left: 10),
         decoration: BoxDecoration(
-          // 多会话区避免整排实心灰胶囊：选中项用轻底，未选中项仅描边。
           color: selected
-              ? AppColors.quietSurfaceOf(context)
+              ? AppColors.accentSoftOf(context)
               : AppColors.contentCanvasOf(context),
-          border: Border.all(color: AppColors.hairlineOf(context)),
+          border: Border.all(
+            color: selected
+                ? AppColors.accentOf(context).withValues(alpha: 0.42)
+                : AppColors.hairlineOf(context),
+            width: selected ? 1.2 : 1,
+          ),
           borderRadius: BorderRadius.circular(AppRadius.pill),
         ),
         child: Row(
@@ -3172,11 +3390,13 @@ class _SessionTab extends StatelessWidget {
               const SizedBox(width: 6),
             ],
             ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 110),
+              constraints: const BoxConstraints(maxWidth: 96),
               child: Text(
                 title,
                 style: (selected ? AppText.calloutStrong : AppText.callout).copyWith(
-                  color: AppColors.textPrimaryOf(context),
+                  color: selected
+                      ? AppColors.textPrimaryOf(context)
+                      : AppColors.placeholderOf(context),
                 ),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
@@ -3189,7 +3409,13 @@ class _SessionTab extends StatelessWidget {
                 width: 44,
                 height: 44,
                 child: Center(
-                  child: Icon(AppIcons.close, size: 13, color: AppColors.textSecondaryOf(context)),
+                  child: Icon(
+                    AppIcons.close,
+                    size: 13,
+                    color: selected
+                        ? AppColors.textSecondaryOf(context)
+                        : AppColors.placeholderOf(context),
+                  ),
                 ),
               ),
             ),

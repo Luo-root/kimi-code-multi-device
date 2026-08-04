@@ -105,9 +105,7 @@ type wireEvent struct {
 			Think string `json:"think"`
 			Text  string `json:"text"`
 		} `json:"part"`
-		Args *struct {
-			Command string `json:"command"`
-		} `json:"args"`
+		Args   json.RawMessage `json:"args"`
 		Result *struct {
 			Output string `json:"output"`
 		} `json:"result"`
@@ -175,10 +173,7 @@ func parseWire(path string) ([]Block, error) {
 				}
 			case "tool.call":
 				flush()
-				cmd := ""
-				if e.Args != nil {
-					cmd = e.Args.Command
-				}
+				cmd := commandFromArgs(e.Args)
 				blocks = append(blocks, Block{
 					Kind: "tool", ToolCallID: e.ToolCallID,
 					ToolName: e.Name, Command: cmd, Desc: e.Description,
@@ -198,6 +193,26 @@ func parseWire(path string) ([]Block, error) {
 	}
 	flush()
 	return blocks, nil
+}
+
+// commandFromArgs 保持 Bash 的简洁 command，同时完整保留 Edit/Read 等结构化参数。
+// Flutter 端的 extract/diff 逻辑读取 Block.Command，因此这里不能丢弃未知字段。
+func commandFromArgs(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var args map[string]interface{}
+	if json.Unmarshal(raw, &args) != nil {
+		return string(raw)
+	}
+	if command, ok := args["command"].(string); ok && command != "" {
+		return command
+	}
+	compact, err := json.Marshal(args)
+	if err != nil {
+		return string(raw)
+	}
+	return string(compact)
 }
 
 func readState(path string) Meta {
