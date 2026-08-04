@@ -41,6 +41,35 @@ abstract final class AppIcons {
   static const IconData terminal = LucideIcons.terminal;
   static const IconData check = LucideIcons.check;
   static const IconData copy = LucideIcons.copy; // 复制消息 / 代码 / 命令
+  static const IconData file = LucideIcons.file_text; // Read
+  static const IconData pencil = LucideIcons.pencil; // Write / Edit（与 rename 同源）
+  static const IconData globe = LucideIcons.globe; // WebFetch
+  static const IconData listTodo = LucideIcons.list; // TodoWrite
+
+  /// 工具名 → 列表行图标。
+  /// AgentGroup 展开后按工具类型用不同图标展示（不只是 terminal）。
+  static IconData iconForTool(String? name) {
+    switch (name) {
+      case 'Read':
+        return file; // file_text — 阅读文件
+      case 'Write':
+      case 'Edit':
+        return pencil; // 写入/编辑
+      case 'Bash':
+      case 'KillBash':
+        return terminal;
+      case 'Grep':
+      case 'Glob':
+      case 'WebSearch':
+        return search;
+      case 'WebFetch':
+        return globe;
+      case 'TodoWrite':
+        return listTodo;
+      default:
+        return terminal;
+    }
+  }
 
   // 批准卡
   static const IconData clock = LucideIcons.clock; // 倒计时

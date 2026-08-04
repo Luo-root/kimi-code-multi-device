@@ -15,6 +15,7 @@ abstract final class AppColors {
   static const Color textSecondary = Color(0xFF86868B);
   static const Color placeholder = Color(0xFFC0C0C0);
   static const Color hairline = Color(0xFFEEF0F2);
+
   /// 暗色画布（scaffold / 大块底色）。
   static const Color backgroundDark = Color(0xFF0E0E10);
 
@@ -56,9 +57,20 @@ abstract final class AppColors {
   /// 卡片/浮层表面色：浅色白 / 暗色近黑。
   static Color surfaceOf(BuildContext c) => HuxTokens.surfacePrimary(c);
 
-  /// 画布（scaffold / 大块底色）。
+  /// 画布（scaffold / 大块底色）。侧边栏等辅助区域继续使用浅灰层级。
   static Color backgroundOf(BuildContext c) =>
       _isDark(c) ? backgroundDark : background;
+
+  /// 主内容画布：浅色用纯白，和浅灰侧边栏拉开层级；暗色保持深色画布，
+  /// 避免把 Hux 的浮层 surface 误当成整页背景而显得发亮。
+  static Color contentCanvasOf(BuildContext c) =>
+      _isDark(c) ? backgroundDark : surface;
+
+  /// 主内容中的轻量控件底色。比 keyCap 更克制，专供 composer / 用户气泡；
+  /// 不影响用户已经满意的侧边栏与通用 Hux secondary 按钮。
+  static Color quietSurfaceOf(BuildContext c) => _isDark(c)
+      ? HuxTokens.buttonSecondaryBackground(c)
+      : const Color(0xFFF3F4F6);
 
   /// 按键/弱底色（如 + 按钮、未选中态）。
   static Color keyCapOf(BuildContext c) =>
