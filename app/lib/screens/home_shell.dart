@@ -1855,8 +1855,8 @@ class _SessionDrawerState extends State<_SessionDrawer> {
 
 /// 工作区抽屉的行内"…"菜单。
 /// 现阶段只有复制 ID 与归档是真实能力；其它（重命名/分叉/导出）等待 kimi
-/// acp 补 API（见 test/probe/session_list_probe_test gap #2），暂以占位
-/// 提示呈现，不空跑。
+/// acp 补 API（见 test/probe/session_list_probe_test gap #2），暂不在菜单
+/// 中显示，避免误导用户。
 class _SessionRowMenu extends StatelessWidget {
   final SessionMeta meta;
   const _SessionRowMenu({required this.meta});
@@ -1878,22 +1878,10 @@ class _SessionRowMenu extends StatelessWidget {
           child: _SessionMenuItem(
               icon: AppIcons.copy, label: '复制 Session ID'),
         ),
-        PopupMenuItem(
-          value: _RowMenuAction.rename,
-          height: 36,
-          child: _SessionMenuItem(icon: AppIcons.command, label: '重命名'),
-        ),
-        PopupMenuItem(
-          value: _RowMenuAction.fork,
-          height: 36,
-          child:
-              _SessionMenuItem(icon: AppIcons.ellipsis, label: '分叉会话'),
-        ),
-        PopupMenuItem(
-          value: _RowMenuAction.export,
-          height: 36,
-          child: _SessionMenuItem(icon: AppIcons.arrowLeft, label: '导出会话'),
-        ),
+        // TODO(gap #2): 恢复重命名/分叉/导出菜单项，当 kimi acp 提供对应 API。
+        // PopupMenuItem(value: _RowMenuAction.rename, ...),
+        // PopupMenuItem(value: _RowMenuAction.fork, ...),
+        // PopupMenuItem(value: _RowMenuAction.export, ...),
         PopupMenuDivider(height: 1),
         PopupMenuItem(
           value: _RowMenuAction.archive,
@@ -1977,7 +1965,7 @@ class _SessionMenuItem extends StatelessWidget {
 
 /// 工作区分组头的「…」菜单：复制工作区路径 / 归档该工作区 / 重命名 / 移除工作区。
 /// 仅「复制路径」与「归档」是真实能力，其余等 kimi acp 补 API（见
-/// test/probe/session_list_probe_test gap #2），暂以 toast 告知。
+/// test/probe/session_list_probe_test gap #2），暂不在菜单中显示，避免误导用户。
 class _GroupMenu extends StatelessWidget {
   final String workspaceKey; // sessionGroupKey（路径末两级）
   final List<String> sessionIds; // 该工作区当前可见（未归档）会话的 sid
@@ -2004,21 +1992,10 @@ class _GroupMenu extends StatelessWidget {
           height: 36,
           child: _SessionMenuItem(icon: AppIcons.archive, label: '归档工作区'),
         ),
-        const PopupMenuItem(
-          value: _GroupMenuAction.rename,
-          height: 36,
-          child: _SessionMenuItem(icon: AppIcons.rename, label: '重命名工作区'),
-        ),
-        const PopupMenuDivider(height: 1),
-        const PopupMenuItem(
-          value: _GroupMenuAction.remove,
-          height: 36,
-          child: _SessionMenuItem(
-            icon: AppIcons.remove,
-            label: '移除工作区',
-            danger: true,
-          ),
-        ),
+        // TODO(gap #2): 恢复重命名/移除工作区菜单项，当 kimi acp 提供对应 API。
+        // const PopupMenuItem(value: _GroupMenuAction.rename, ...),
+        // const PopupMenuDivider(height: 1),
+        // const PopupMenuItem(value: _GroupMenuAction.remove, ...),
       ],
       onSelected: (a) => _onSelected(context, a),
       child: SizedBox(
