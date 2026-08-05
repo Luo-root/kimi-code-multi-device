@@ -18,7 +18,7 @@
 > - **「停」与输出态关联**：停键可见性不再用"末块类型"猜，改由中继 `session/prompt` 发出→返回的 **busy 态**驱动（`session.busy` 广播），输出完即退场；重连 snapshot 补发 busy。
 > - **Markdown 渲染**：agent 回复区按 Markdown 渲染（标题/加粗/行内码/代码块/列表/引用），命令与代码统一用**深色代码块**（等宽、可选中、横向滚动），不裸排浅底。
 > - **侧边栏 = 切换**：点会话是「切换 C 位」，active 直接切、历史 open_history 后切，不再是"给主屏加一个可切换会话"。
-> - **对齐 Kimi 官方风格**：`accent` 由 iOS 蓝改为 **Kimi 标志紫 `#6B5CE7`**；极简留白、微动效；暗色主题（月之暗面）登记为可选变体，浅色（月之亮面）为 v1 默认。移除开发期调色盘入口。
+> - **对齐 Kimi 官方风格（v1.1，已被 v1.3 覆盖，见 §G）**：`accent` 由 iOS 蓝改为 **Kimi 标志紫 `#6B5CE7`**；极简留白、微动效；暗色主题（月之暗面）登记为可选变体，浅色（月之亮面）为 v1 默认。移除开发期调色盘入口。
 > - **mode 菜单去描述**：只留图标+名称，去掉副标题描述。
 
 > 配套实物：可交互界面原型见 `sentinel-prototype.html`；带活 demo 的网页版规格书见 `sentinel-design-spec.html`。本 Markdown 为**纯文本定稿**，便于阅读、检索与版本保存，内容与上述两份一致。
@@ -750,3 +750,13 @@ agent 忙时又发一句 Kimi 怎么处理，v0 没测；v1 输入框始终可�
 - `stream_block.dart`：`_textBlock()` 改为左侧头像 + 右侧标题 + 正文（WorkBuddy 消息排版）；`_think()` 标题在 streaming 时改用 `LiquidText('思考')`，不再显示「思考中…」/ spinner。
 - `home_shell.dart`：等待首 token 的占位直接显示 `KimiCodeLoader()`（即 AI 消息头部，头像 + 液态「kimi-code」）。
 - 验证：`flutter analyze` 0、`flutter test` 3/3。
+
+## §G 设计语言修订（v1.3 · 2026-08-03）
+
+> 推翻 v1.1 的「Kimi 标志紫」决策，与代码实际对齐。纯文档修订，无代码改动。
+
+- **accent 回归中性黑**：经确证 SENTINEL 规范**未指定 Kimi 紫**，SENTINEL 品牌色不是 Kimi 紫；改用 **hux 设计语言的中性黑/白主色**，`AppColors.accent` = `0xFF1D1D1F`（近中性黑，非品牌紫）。hux 作主题底座，明暗双主题一致性更好；决策锚点（勾选图标 / 状态点 / 链接）改用中性黑。
+- **字体放开**：规范放开第三方字体约束，以 Manrope 为默认字体（SIL OFL 1.1），中文走回退链兜底。
+- **Kimi 蓝 logo 不冲突**：官方「蓝色小头」logo（`#027aff`）仅作 AI 消息头部指示器（§F2/F3），与中性黑 accent 各司其职，互不替代。
+- **暗色主题**：沿用 v1.1 的「月之暗面」可选变体，现由 hux tokens 驱动、随系统切换。
+- **现状一致性**：`app/lib/theme/app_colors.dart` 的 `accent` 早已是 `0xFF1D1D1F`，本文现已与其一致。
