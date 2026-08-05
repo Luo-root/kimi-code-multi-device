@@ -79,7 +79,7 @@ type DownPermRequestPayload struct {
 	ToolCall     json.RawMessage `json:"toolCall"`
 	Options      json.RawMessage `json:"options"`
 	DeadlineMs   int64           `json:"deadlineMs,omitempty"` // 超时截止（ms），端据此倒计时
-	Critical     bool            `json:"critical,omitempty"`   // §10 3.4 命中关键命令清单
+	Critical     bool            `json:"critical"`             // 关键命令判定：relay 端 risk.IsCritical 计算，app 直接消费
 }
 type DownSessionCreatedPayload struct {
 	ConfigOptions json.RawMessage `json:"configOptions"`
@@ -98,7 +98,6 @@ type DownRelayStatePayload struct {
 }
 type DownRelayConfigPayload struct {
 	BarkURL             string `json:"barkUrl"`
-	BarkEnabled         bool   `json:"barkEnabled"`
 	PermTimeoutSeconds  int    `json:"permTimeoutSeconds"`
 	AutoPassNonCritical bool   `json:"autoPassNonCritical"`
 	ConfigPath          string `json:"configPath,omitempty"` // 配置文件位置，端侧展示

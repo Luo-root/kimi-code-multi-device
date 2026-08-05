@@ -243,6 +243,10 @@ class PermissionRequest {
   final String command;
   final List<PermOption> options;
 
+  /// 关键命令判定：relay 经 permission.request 下发（risk.IsCritical 计算），
+  /// app 直接消费，不再自算。
+  final bool critical;
+
   /// 中继设定的超时截止时刻（ms since epoch）；缺失则由端兜底 5 分钟。
   final DateTime? deadline;
 
@@ -252,6 +256,7 @@ class PermissionRequest {
     required this.title,
     required this.command,
     required this.options,
+    required this.critical,
     this.deadline,
   });
 
@@ -277,47 +282,20 @@ class PermissionRequest {
       title: tc['title']?.toString() ?? 'tool',
       command: extractToolText(tc),
       options: opts,
+      critical: p['critical'] == true,
       deadline: deadline,
     );
   }
 }
 
-/// §10 3.4 二元风险：内置关键命令清单，命中=红、要确认；其余中性。
-/// 不维护白名单——维护痛 ＞ 误判痛。
-const criticalCommandPatterns = <String>[
-  r'rm\s+-rf',
-  r'sudo\b',
-  r'git\s+push\s+(-f|--force)',
-  r'git\s+reset\s+--hard',
-  r'git\s+clean\s+-fd',
-  r'curl\s+.*\|\s*(sh|bash)',
-  r'wget\s+.*\|\s*(sh|bash)',
-  r'\bdeploy\b',
-  r'drop\s+(database|table)',
-  r'truncate\s+table',
-  r'>\s*~?/?\.ssh',
-  r'chmod\s+-R',
-  r'mkfs\b',
-  r'\bdd\s+if=',
-  r'\btruncate\b',
-];
-
-bool isCriticalCommand(String cmd) {
-  if (cmd.isEmpty) return false;
-  final lower = cmd.toLowerCase();
-  return criticalCommandPatterns.any((p) => RegExp(p).hasMatch(lower));
-}
-
 /// 中继运行配置快照（relay.config 下行）。设置页据此展示/编辑真实值，
 /// 避免"看着能改、实际没改"的假设置（诚实原则 §12）。
 class RelayConfig {
-  final bool barkEnabled;
   final String barkUrl;
   final int permTimeoutSeconds;
   final bool autoPassNonCritical;
   final String configPath;
   const RelayConfig({
-    required this.barkEnabled,
     required this.barkUrl,
     required this.permTimeoutSeconds,
     required this.autoPassNonCritical,
@@ -325,7 +303,6 @@ class RelayConfig {
   });
 
   factory RelayConfig.fromPayload(Map<String, dynamic> p) => RelayConfig(
-    barkEnabled: p['barkEnabled'] == true,
     barkUrl: p['barkUrl']?.toString() ?? '',
     permTimeoutSeconds: (p['permTimeoutSeconds'] as num?)?.toInt() ?? 300,
     autoPassNonCritical: p['autoPassNonCritical'] == true,
@@ -338,7 +315,6 @@ class RelayConfig {
     int? permTimeoutSeconds,
     bool? autoPassNonCritical,
   }) => RelayConfig(
-    barkEnabled: barkUrl != null ? barkUrl.isNotEmpty : barkEnabled,
     barkUrl: barkUrl ?? this.barkUrl,
     permTimeoutSeconds: permTimeoutSeconds ?? this.permTimeoutSeconds,
     autoPassNonCritical: autoPassNonCritical ?? this.autoPassNonCritical,
