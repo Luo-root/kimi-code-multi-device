@@ -2714,7 +2714,7 @@ class _PermSheetState extends State<_PermSheet>
   @override
   Widget build(BuildContext context) {
     final p = widget.perm;
-    final critical = isCriticalCommand(p.command);
+    final critical = p.critical;
     final barColor = critical ? AppColors.reject : AppColors.textSecondaryOf(context);
     final out = _remaining == Duration.zero;
 

@@ -537,7 +537,6 @@ func (r *Relay) relayConfig() DownRelayConfigPayload {
 func (r *Relay) relayConfigLocked() DownRelayConfigPayload {
 	return DownRelayConfigPayload{
 		BarkURL:             r.cfg.Bark.URL,
-		BarkEnabled:         r.bark.Enabled(),
 		PermTimeoutSeconds:  r.cfg.Permission.TimeoutSeconds,
 		AutoPassNonCritical: r.cfg.Permission.AutoPassNonCritical,
 		ConfigPath:          r.cfgPath,
