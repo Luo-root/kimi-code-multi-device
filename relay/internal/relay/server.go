@@ -25,8 +25,29 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// acpClient 是 Relay 依赖的 ACP 客户端能力接口。
+// 把 *acp.Client 的具体类型抽象成接口，便于在测试中注入 fake，
+// 无需拉起真实的 kimi 子进程。*acp.Client 已实现该接口（见下方断言）。
+type acpClient interface {
+	Initialize(ctx context.Context) (acpsdk.InitializeResponse, error)
+	Authenticate(ctx context.Context, req acpsdk.AuthenticateRequest) (acpsdk.AuthenticateResponse, error)
+	NewSession(ctx context.Context, cwd string) (acpsdk.SessionId, []acpsdk.SessionConfigOption, error)
+	ListSessions(ctx context.Context) ([]acpsdk.SessionInfo, error)
+	ResumeSession(ctx context.Context, sid, cwd string) ([]acpsdk.SessionConfigOption, error)
+	Prompt(ctx context.Context, sid, text string) error
+	Cancel(ctx context.Context, sid string) error
+	SetMode(ctx context.Context, sid, modeID string) error
+	SetConfigOption(ctx context.Context, sid, configID, value string) error
+	Restart() error
+	DebugKill()
+	Close()
+}
+
+// 编译期断言：*acp.Client 满足 acpClient 接口。
+var _ acpClient = (*acp.Client)(nil)
+
 type Relay struct {
-	acp      *acp.Client
+	acp      acpClient
 	store    *session.Store
 	kimiHome string
 
