@@ -3,14 +3,18 @@ package relay
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	acpsdk "github.com/coder/acp-go-sdk"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/acp"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/bark"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/config"
@@ -21,8 +25,29 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// acpClient 是 Relay 依赖的 ACP 客户端能力接口。
+// 把 *acp.Client 的具体类型抽象成接口，便于在测试中注入 fake，
+// 无需拉起真实的 kimi 子进程。*acp.Client 已实现该接口（见下方断言）。
+type acpClient interface {
+	Initialize(ctx context.Context) (acpsdk.InitializeResponse, error)
+	Authenticate(ctx context.Context, req acpsdk.AuthenticateRequest) (acpsdk.AuthenticateResponse, error)
+	NewSession(ctx context.Context, cwd string) (acpsdk.SessionId, []acpsdk.SessionConfigOption, error)
+	ListSessions(ctx context.Context) ([]acpsdk.SessionInfo, error)
+	ResumeSession(ctx context.Context, sid, cwd string) ([]acpsdk.SessionConfigOption, error)
+	Prompt(ctx context.Context, sid, text string) error
+	Cancel(ctx context.Context, sid string) error
+	SetMode(ctx context.Context, sid, modeID string) error
+	SetConfigOption(ctx context.Context, sid, configID, value string) error
+	Restart() error
+	DebugKill()
+	Close()
+}
+
+// 编译期断言：*acp.Client 满足 acpClient 接口。
+var _ acpClient = (*acp.Client)(nil)
+
 type Relay struct {
-	acp      *acp.Client
+	acp      acpClient
 	store    *session.Store
 	kimiHome string
 
@@ -41,8 +66,20 @@ type Relay struct {
 	// kimi 健康（§08 ⑥ 心跳）：false=degraded。OnExit 置 false，Restart 置 true。
 	kimiAlive bool
 
+	// 权限等待表：manual 模式下 OnPermission 同步阻塞，直到端侧拍板 / 超时 / kimi 退出。
+	// key 为中继生成的 permID（json.RawMessage 形式下发给端侧，端侧原样回传）。
+	permMu     sync.Mutex
+	permWaiters map[string]chan permOutcome
+	permSeq    atomic.Int64
+
 	mu      sync.RWMutex
 	clients map[*client]bool
+}
+
+// permOutcome 是阻塞中的 OnPermission 回调等待的裁决结果。
+type permOutcome struct {
+	resp acpsdk.RequestPermissionResponse
+	err  error
 }
 
 type client struct {
@@ -74,6 +111,7 @@ func New() *Relay {
 		bark:                bark.New(cfg.Bark.URL),
 		permTimeout:         time.Duration(cfg.Permission.TimeoutSeconds) * time.Second,
 		autoPassNonCritical: cfg.Permission.AutoPassNonCritical,
+		permWaiters:         map[string]chan permOutcome{},
 	}
 	r.permit = permit.New(r.onPermTimeout)
 	return r
@@ -97,13 +135,11 @@ func (r *Relay) Start() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if _, err := r.acp.Request(ctx, "initialize", map[string]any{
-		"protocolVersion":    1,
-		"clientCapabilities": map[string]any{},
-		"clientInfo":         map[string]any{"name": "sentinel-relay", "version": "0.1"},
-	}); err != nil {
+	initRes, err := r.acp.Initialize(ctx)
+	if err != nil {
 		return err
 	}
+	r.afterInitialize(ctx, initRes)
 	r.kimiAlive = true
 	cwd, _ := os.Getwd()
 	if _, err := r.newSession(ctx, cwd); err != nil {
@@ -115,6 +151,43 @@ func (r *Relay) Start() error {
 	return nil
 }
 
+// afterInitialize 在 initialize 成功后做的规范对齐动作：
+// 1) 记录 kimi 下发的 agentCapabilities / authMethods（ACP 规范要求 initialize 返回能力矩阵）；
+// 2) 补 authenticate 握手（method_id='login'）。已登录环境通常直接成功；
+//    返回 authRequired(-32000) 时 best-effort 忽略，不阻断启动（当前环境无需鉴权即可 session/new）。
+func (r *Relay) afterInitialize(ctx context.Context, res acpsdk.InitializeResponse) {
+	r.logAgentCapabilities(res)
+	if err := r.authenticate(ctx); err != nil {
+		log.Printf("[relay] authenticate 跳过（已登录或无需鉴权）: %v", err)
+	}
+}
+
+// authenticate 补鉴权握手。authRequired(-32000) 视为当前环境免鉴权，best-effort 忽略。
+func (r *Relay) authenticate(ctx context.Context) error {
+	_, err := r.acp.Authenticate(ctx, acpsdk.AuthenticateRequest{MethodId: "login"})
+	if err != nil {
+		var re *acpsdk.RequestError
+		if errors.As(err, &re) && re.Code == -32000 {
+			log.Printf("[relay] authenticate: 当前环境免鉴权（authRequired），best-effort 继续")
+			return nil
+		}
+	}
+	return err
+}
+
+// logAgentCapabilities 把 initialize 响应里的能力矩阵与鉴权方式打到日志，便于对齐/排查。
+func (r *Relay) logAgentCapabilities(res acpsdk.InitializeResponse) {
+	if res.AgentInfo != nil {
+		log.Printf("[relay] kimi agentInfo name=%s version=%s", res.AgentInfo.Name, res.AgentInfo.Version)
+	}
+	if b, err := json.Marshal(res.AgentCapabilities); err == nil {
+		log.Printf("[relay] kimi capabilities=%s", string(b))
+	}
+	if b, err := json.Marshal(res.AuthMethods); err == nil {
+		log.Printf("[relay] kimi authMethods=%s", string(b))
+	}
+}
+
 func (r *Relay) Close() {
 	if r.acp != nil {
 		r.acp.Close()
@@ -122,37 +195,39 @@ func (r *Relay) Close() {
 }
 
 func (r *Relay) newSession(ctx context.Context, cwd string) (string, error) {
-	m, err := r.acp.Request(ctx, "session/new", map[string]any{
-		"cwd": cwd, "mcpServers": []any{},
-	})
+	sid, configOpts, err := r.acp.NewSession(ctx, cwd)
 	if err != nil {
 		return "", err
 	}
-	var res struct {
-		SessionID     string          `json:"sessionId"`
-		ConfigOptions json.RawMessage `json:"configOptions"`
-	}
-	_ = json.Unmarshal(m.Result, &res)
-	r.store.SetCWD(res.SessionID, cwd)
-	r.store.SetConfig(res.SessionID, res.ConfigOptions)
+	sidStr := string(sid)
+	raw := acp.ConfigOptionsToRaw(configOpts)
+	r.store.SetCWD(sidStr, cwd)
+	r.store.SetConfig(sidStr, raw)
 	r.broadcast(Env{
 		Type:      DownSessionCreated,
-		SessionID: res.SessionID,
-		Payload:   mustJSON(DownSessionCreatedPayload{ConfigOptions: res.ConfigOptions}),
+		SessionID: sidStr,
+		Payload:   mustJSON(DownSessionCreatedPayload{ConfigOptions: raw}),
 	})
-	return res.SessionID, nil
+	return sidStr, nil
 }
 
 func (r *Relay) refreshHistory(ctx context.Context) error {
-	m, err := r.acp.Request(ctx, "session/list", map[string]any{})
+	infos, err := r.acp.ListSessions(ctx)
 	if err != nil {
 		return err
 	}
-	var res struct {
-		Sessions []session.SessionMeta `json:"sessions"`
+	metas := make([]session.SessionMeta, 0, len(infos))
+	for _, s := range infos {
+		m := session.SessionMeta{SessionID: string(s.SessionId), CWD: s.Cwd}
+		if s.Title != nil {
+			m.Title = *s.Title
+		}
+		if s.UpdatedAt != nil {
+			m.UpdatedAt = *s.UpdatedAt
+		}
+		metas = append(metas, m)
 	}
-	_ = json.Unmarshal(m.Result, &res)
-	r.store.SetHistory(res.Sessions)
+	r.store.SetHistory(metas)
 	return nil
 }
 
@@ -180,18 +255,15 @@ func (r *Relay) openHistory(sid, cwd string) {
 	// 历史会话：resume 恢复 Kimi 侧上下文
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	m, err := r.acp.Request(ctx, "session/resume", map[string]any{"sessionId": sid, "cwd": cwd})
+	opts, err := r.acp.ResumeSession(ctx, sid, cwd)
 	if err != nil {
 		r.sendErr(sid, "恢复历史会话失败: "+err.Error())
 		return
 	}
-	var res struct {
-		ConfigOptions json.RawMessage `json:"configOptions"`
-	}
-	_ = json.Unmarshal(m.Result, &res)
+	raw := acp.ConfigOptionsToRaw(opts)
 	r.store.SetCWD(sid, cwd)
-	if len(res.ConfigOptions) > 0 {
-		r.store.SetConfig(sid, res.ConfigOptions)
+	if len(opts) > 0 {
+		r.store.SetConfig(sid, raw)
 	}
 	// 读历史回放（先于 created 发送，前端按序处理：先渲染历史，再据 resumed 决定是否兜底）
 	blocks, meta, herr := replay.LoadHistory(r.kimiHome, sid)
@@ -209,7 +281,7 @@ func (r *Relay) openHistory(sid, cwd string) {
 	r.broadcast(Env{
 		Type:      DownSessionCreated,
 		SessionID: sid,
-		Payload:   mustJSON(DownSessionCreatedPayload{ConfigOptions: res.ConfigOptions, Resumed: true}),
+		Payload:   mustJSON(DownSessionCreatedPayload{ConfigOptions: raw, Resumed: true}),
 	})
 }
 
@@ -226,13 +298,15 @@ func (r *Relay) onUpdate(sid string, update json.RawMessage) {
 	r.broadcast(Env{Type: DownSessionUpdate, SessionID: sid, Payload: update})
 }
 
-func (r *Relay) onPermission(sid string, id json.RawMessage, params json.RawMessage) {
-	var p struct {
-		ToolCall json.RawMessage `json:"toolCall"`
-		Options  json.RawMessage `json:"options"`
-	}
-	_ = json.Unmarshal(params, &p)
-	command := extractCommand(p.ToolCall)
+// onPermission 是 SDK 的同步权限回调：kimi 每次请求权限都会阻塞在此，直到本函数返回
+// 决定（SDK 据此回 JSON-RPC response 给 kimi）。yolo/auto 立即放行；plan 拒绝；
+// manual 则挂号入 permit 管理器、下发端侧等待拍板，并阻塞在 permWaiters 通道上，
+// 由 UpPermDecision（端侧决定）或 onPermTimeout（超时代答）或 onKimiExit（进程退出）唤醒。
+func (r *Relay) onPermission(ctx context.Context, req acpsdk.RequestPermissionRequest) (acpsdk.RequestPermissionResponse, error) {
+	sid := string(req.SessionId)
+	toolCall := mustJSON(req.ToolCall)
+	options := mustJSON(req.Options)
+	command := extractCommand(toolCall)
 	critical := risk.IsCritical(command)
 	mode := r.store.Mode(sid)
 
@@ -240,39 +314,88 @@ func (r *Relay) onPermission(sid string, id json.RawMessage, params json.RawMess
 	case "yolo", "auto":
 		// agent 自主决策：直接放行，不打扰人（哨兵退场）。
 		log.Printf("[relay] %s 模式自动放行 sid=%s critical=%v", mode, sid, critical)
-		r.respondPermission(id, "approve_once")
+		return permResponse("approve_once"), nil
 	case "plan":
 		// 只读模式不应有工具调用，记异常并拒绝。
 		log.Printf("[relay] plan 模式出现工具调用，拒绝 sid=%s: %s", sid, command)
-		r.respondPermission(id, "reject")
+		return permResponse("reject"), nil
 	default: // manual / default —— 哨兵在场
+		permID := r.nextPermID()
+		permIDRaw := json.RawMessage(strconv.Quote(permID))
 		r.cfgMu.RLock()
 		deadline := time.Now().Add(r.permTimeout)
 		r.cfgMu.RUnlock()
-		r.permit.Register(sid, id, deadline, critical)
+		r.permit.Register(sid, permIDRaw, deadline, critical)
+
+		// 登记等待通道（缓冲 1，避免唤醒端阻塞）。
+		ch := make(chan permOutcome, 1)
+		r.permMu.Lock()
+		r.permWaiters[permID] = ch
+		r.permMu.Unlock()
+
 		r.broadcast(Env{
 			Type:      DownPermRequest,
 			SessionID: sid,
 			Payload: mustJSON(DownPermRequestPayload{
-				PermissionID: id, ToolCall: p.ToolCall, Options: p.Options,
+				PermissionID: permIDRaw, ToolCall: toolCall, Options: options,
 				DeadlineMs: deadline.UnixMilli(), Critical: critical,
 			}),
 		})
 		// 门铃只当门铃，不传命令内容。
 		r.bark.Notify("SENTINEL", "有命令等你批准")
+
+		// 阻塞，直到端侧拍板 / 超时代答 / 上下文取消（kimi 退出会取消 reqCtx）。
+		select {
+		case out := <-ch:
+			return out.resp, out.err
+		case <-ctx.Done():
+			log.Printf("[relay] 许可请求被取消（上下文结束）sid=%s", sid)
+			return permCancelled(), ctx.Err()
+		}
 	}
 }
 
-// respondPermission 回 Kimi 一个许可决定。
-func (r *Relay) respondPermission(id json.RawMessage, optionID string) {
-	if err := r.acp.Respond(id, map[string]any{
-		"outcome": map[string]any{"outcome": "selected", "optionId": optionID},
-	}); err != nil {
-		r.sendErr("", "permission respond: "+err.Error())
+// nextPermID 生成进程中唯一的中继侧许可 ID，用于关联端侧回传与阻塞的 OnPermission。
+func (r *Relay) nextPermID() string {
+	return "perm-" + strconv.FormatInt(r.permSeq.Add(1), 10)
+}
+
+// deliverPermission 把裁决结果投递给阻塞中的 OnPermission 回调（非阻塞：通道缓冲 1）。
+func (r *Relay) deliverPermission(id json.RawMessage, resp acpsdk.RequestPermissionResponse) {
+	var key string
+	if err := json.Unmarshal(id, &key); err != nil {
+		key = strings.Trim(string(id), `"`)
+	}
+	r.permMu.Lock()
+	ch, ok := r.permWaiters[key]
+	if ok {
+		delete(r.permWaiters, key)
+	}
+	r.permMu.Unlock()
+	if ok {
+		ch <- permOutcome{resp: resp, err: nil}
 	}
 }
 
-// onPermTimeout 超时未决：按策略代答（默认拒绝；非关键+开关开则放行）+ 广播失效 + 门铃。
+// permResponse 构造「用户选定某选项」的许可决定。
+func permResponse(optionID string) acpsdk.RequestPermissionResponse {
+	return acpsdk.RequestPermissionResponse{Outcome: acpsdk.RequestPermissionOutcome{
+		Selected: &acpsdk.RequestPermissionOutcomeSelected{
+			OptionId: acpsdk.PermissionOptionId(optionID),
+			Outcome:  "selected",
+		},
+	}}
+}
+
+// permCancelled 构造「请求已取消」的许可决定（kimi 取消 prompt 或连接关闭时返回）。
+func permCancelled() acpsdk.RequestPermissionResponse {
+	return acpsdk.RequestPermissionResponse{Outcome: acpsdk.RequestPermissionOutcome{
+		Cancelled: &acpsdk.RequestPermissionOutcomeCancelled{Outcome: "cancelled"},
+	}}
+}
+
+// onPermTimeout 超时未决：按策略代答（默认拒绝；非关键+开关开则放行），
+// 投递给阻塞的 OnPermission，并广播失效 + 门铃。
 func (r *Relay) onPermTimeout(sid string, id json.RawMessage, critical bool) {
 	r.cfgMu.RLock()
 	autoPass := r.autoPassNonCritical
@@ -283,7 +406,7 @@ func (r *Relay) onPermTimeout(sid string, id json.RawMessage, critical bool) {
 		optionID = "approve_once"
 		note = "一条非关键命令已超时自动放行"
 	}
-	r.respondPermission(id, optionID)
+	r.deliverPermission(id, permResponse(optionID))
 	r.broadcast(Env{Type: DownPermInvalidate})
 	r.bark.Notify("SENTINEL", note)
 	log.Printf("[relay] 许可超时 sid=%s critical=%v → %s", sid, critical, optionID)
@@ -329,7 +452,14 @@ func stripCmdPrefix(s string) string {
 func (r *Relay) onKimiExit() {
 	log.Println("[relay] kimi 子进程退出（非预期）→ degraded")
 	r.kimiAlive = false
-	// kimi 没了，pending 许可 respond 无意义，只清定时器；端侧凭 invalidate 收尾。
+	// kimi 没了，解除所有被阻塞的 OnPermission 回调，避免 goroutine 永久挂起；
+	// 同时 pending 许可 respond 无意义，清定时器；端侧凭 invalidate 收尾。
+	r.permMu.Lock()
+	for k, ch := range r.permWaiters {
+		delete(r.permWaiters, k)
+		ch <- permOutcome{resp: permCancelled(), err: nil}
+	}
+	r.permMu.Unlock()
 	r.permit.InvalidateAll()
 	r.broadcast(Env{Type: DownPermInvalidate})
 	r.broadcast(Env{Type: DownRelayState, Payload: mustJSON(DownRelayStatePayload{State: "degraded"})})
@@ -343,17 +473,15 @@ func (r *Relay) restartKimi() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if _, err := r.acp.Request(ctx, "initialize", map[string]any{
-		"protocolVersion":    1,
-		"clientCapabilities": map[string]any{},
-		"clientInfo":         map[string]any{"name": "sentinel-relay", "version": "0.1"},
-	}); err != nil {
+	initRes, err := r.acp.Initialize(ctx)
+	if err != nil {
 		r.sendErr("", "restart initialize: "+err.Error())
 		return
 	}
+	r.afterInitialize(ctx, initRes)
 	for _, sid := range r.store.SIDs() {
 		cwd := r.store.CWD(sid)
-		m, err := r.acp.Request(ctx, "session/resume", map[string]any{"sessionId": sid, "cwd": cwd})
+		opts, err := r.acp.ResumeSession(ctx, sid, cwd)
 		if err != nil {
 			log.Printf("[relay] resume %s 失败: %v", sid, err)
 			r.sendErr(sid, "会话恢复失败，上下文可能丢失: "+err.Error())
@@ -363,12 +491,9 @@ func (r *Relay) restartKimi() {
 			r.broadcast(Env{Type: DownSessionClosed, SessionID: sid})
 			continue
 		}
-		var res struct {
-			ConfigOptions json.RawMessage `json:"configOptions"`
-		}
-		_ = json.Unmarshal(m.Result, &res)
-		if len(res.ConfigOptions) > 0 {
-			r.store.SetConfig(sid, res.ConfigOptions)
+		raw := acp.ConfigOptionsToRaw(opts)
+		if len(opts) > 0 {
+			r.store.SetConfig(sid, raw)
 		}
 	}
 	r.kimiAlive = true
@@ -532,11 +657,7 @@ func (r *Relay) handleUp(c *client, data []byte) {
 			log.Printf("[relay] 许可决定迟到（已超时代答）: %s", d.OptionID)
 			return
 		}
-		if err := r.acp.Respond(d.PermissionID, map[string]any{
-			"outcome": map[string]any{"outcome": "selected", "optionId": d.OptionID},
-		}); err != nil {
-			r.sendErr(e.SessionID, "permission respond: "+err.Error())
-		}
+		r.deliverPermission(d.PermissionID, permResponse(d.OptionID))
 	case UpPrompt:
 		var p UpPromptPayload
 		_ = json.Unmarshal(e.Payload, &p)
@@ -555,10 +676,7 @@ func (r *Relay) handleUp(c *client, data []byte) {
 			start := time.Now()
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			defer cancel()
-			_, err := r.acp.Request(ctx, "session/prompt", map[string]any{
-				"sessionId": sid,
-				"prompt":    []any{map[string]any{"type": "text", "text": p.Text}},
-			})
+			err := r.acp.Prompt(ctx, sid, p.Text)
 			elapsed := time.Since(start)
 			// busy 结束：输出完毕（成功或出错都算跑完），「停」退场。
 			r.store.SetBusy(sid, false)
@@ -577,11 +695,13 @@ func (r *Relay) handleUp(c *client, data []byte) {
 	case UpCancel:
 		sid := e.SessionID
 		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
 			// session/cancel 是 ACP notification（无 id）；带 id 的 request 形式会被
 			// kimi 拒为 -32601 Method not found（实测 0.32.0，二进制内嵌 SDK 注释证实）。
 			// notification 形式立即中断当前轮：prompt 以 stopReason=cancelled 返回，
 			// busy 随 prompt goroutine 自然复位，会话可继续使用（均已实测）。
-			if err := r.acp.Notify("session/cancel", map[string]any{"sessionId": sid}); err != nil {
+			if err := r.acp.Cancel(ctx, sid); err != nil {
 				r.sendErr(sid, "cancel: "+err.Error())
 			}
 		}()
@@ -592,7 +712,9 @@ func (r *Relay) handleUp(c *client, data []byte) {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			_, _ = r.acp.Request(ctx, "session/set_mode", map[string]any{"sessionId": sid, "modeId": s.ModeID})
+			if err := r.acp.SetMode(ctx, sid, s.ModeID); err != nil {
+				r.sendErr(sid, "set_mode: "+err.Error())
+			}
 		}()
 	case UpSetModel:
 		var s UpSetModelPayload
@@ -601,9 +723,9 @@ func (r *Relay) handleUp(c *client, data []byte) {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			_, _ = r.acp.Request(ctx, "session/set_config_option", map[string]any{
-				"sessionId": sid, "configId": "model", "value": s.Value,
-			})
+			if err := r.acp.SetConfigOption(ctx, sid, "model", s.Value); err != nil {
+				r.sendErr(sid, "set_config_option: "+err.Error())
+			}
 		}()
 	case UpNewSession:
 		var n UpNewSessionPayload
@@ -641,12 +763,9 @@ func (r *Relay) handleUp(c *client, data []byte) {
 			return
 		}
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			// 尽力关闭 Kimi 侧会话（ACP 不支持则忽略错误，端侧 tab 仍移除）。
-			if _, err := r.acp.Request(ctx, "session/close", map[string]any{"sessionId": sid}); err != nil {
-				log.Printf("[relay] session/close %s 失败（忽略）: %v", sid, err)
-			}
+			// ACP 规范（kimi-acp 文档「稳定面」清单）：kimi 未实现 session/close，
+			// 向其发该 RPC 必然 methodNotFound。故只做本地清理 + 通知端侧移除 tab，
+			// 不再发无意义的请求（此前每次关 tab 都会打一条失败日志）。
 			r.store.Remove(sid)
 			r.broadcast(Env{Type: DownSessionClosed, SessionID: sid})
 		}()
