@@ -28,6 +28,18 @@ type Config struct {
 		// AutoPassNonCritical 非关键命令超时自动放行开关。
 		AutoPassNonCritical bool `toml:"auto_pass_non_critical"`
 	} `toml:"permission"`
+	// KimiWeb 是「通道② 本机管理通道」配置：补齐 ACP 未覆盖的会话管理
+	// （archive/fork/delete/restore/rename/export）。需 kimi web --debug-endpoints。
+	// 默认关闭；开启后二选一：① 填 base_url+token 直连已运行的 kimi web；
+	// ② auto_start=true 由 relay 代启 kimi web 并捕获启动横幅里的 token。
+	KimiWeb struct {
+		Enabled        bool   `toml:"enabled"`
+		BaseURL        string `toml:"base_url"`
+		Token          string `toml:"token"`
+		AutoStart      bool   `toml:"auto_start"`
+		Port           int    `toml:"port"`
+		DebugEndpoints bool   `toml:"debug_endpoints"`
+	} `toml:"kimiweb"`
 }
 
 // Path 返回配置文件路径：RELAY_CONFIG 优先，否则 KIMI_CODE_HOME/relay.toml，
@@ -62,6 +74,28 @@ func Load(path string) (*Config, error) {
 	}
 	c.Permission.AutoPassNonCritical = os.Getenv("PERM_AUTO_PASS_NONCRITICAL") == "1"
 
+	// kimiweb（管理通道）环境变量回退
+	if v := os.Getenv("KIMIWEB_ENABLED"); v == "1" || v == "true" {
+		c.KimiWeb.Enabled = true
+	}
+	if v := os.Getenv("KIMIWEB_BASE_URL"); v != "" {
+		c.KimiWeb.BaseURL = v
+	}
+	if v := os.Getenv("KIMIWEB_TOKEN"); v != "" {
+		c.KimiWeb.Token = v
+	}
+	if v := os.Getenv("KIMIWEB_AUTO_START"); v == "1" || v == "true" {
+		c.KimiWeb.AutoStart = true
+	}
+	if v := os.Getenv("KIMIWEB_PORT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.KimiWeb.Port = n
+		}
+	}
+	if v := os.Getenv("KIMIWEB_DEBUG_ENDPOINTS"); v == "1" || v == "true" {
+		c.KimiWeb.DebugEndpoints = true
+	}
+
 	// 默认值
 	if c.Permission.TimeoutSeconds <= 0 {
 		c.Permission.TimeoutSeconds = DefaultTimeoutSeconds
@@ -85,6 +119,25 @@ func Load(path string) (*Config, error) {
 	}
 	if hasTOMLKey(md, "permission", "auto_pass_non_critical") {
 		c.Permission.AutoPassNonCritical = tmp.Permission.AutoPassNonCritical
+	}
+	// kimiweb（管理通道）：按 key 出现合并，文件未写则不覆盖 env/默认。
+	if hasTOMLKey(md, "kimiweb", "enabled") {
+		c.KimiWeb.Enabled = tmp.KimiWeb.Enabled
+	}
+	if hasTOMLKey(md, "kimiweb", "base_url") {
+		c.KimiWeb.BaseURL = tmp.KimiWeb.BaseURL
+	}
+	if hasTOMLKey(md, "kimiweb", "token") {
+		c.KimiWeb.Token = tmp.KimiWeb.Token
+	}
+	if hasTOMLKey(md, "kimiweb", "auto_start") {
+		c.KimiWeb.AutoStart = tmp.KimiWeb.AutoStart
+	}
+	if hasTOMLKey(md, "kimiweb", "port") && tmp.KimiWeb.Port > 0 {
+		c.KimiWeb.Port = tmp.KimiWeb.Port
+	}
+	if hasTOMLKey(md, "kimiweb", "debug_endpoints") {
+		c.KimiWeb.DebugEndpoints = tmp.KimiWeb.DebugEndpoints
 	}
 	return c, nil
 }
