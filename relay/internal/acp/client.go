@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"sync"
@@ -153,6 +154,13 @@ func (c *Client) Respond(id json.RawMessage, result any) error {
 	return c.send(rpcMsg{JSONRPC: "2.0", ID: id, Result: r})
 }
 
+// RespondError 回 Kimi 一个 JSON-RPC 错误（用于未实现的 reverse-RPC，如 fs/*）。
+// 规范：未列出的方法一律返回 methodNotFound，避免 Kimi 的请求悬空等待。
+func (c *Client) RespondError(id json.RawMessage, code int, message string) error {
+	e, _ := json.Marshal(map[string]any{"code": code, "message": message})
+	return c.send(rpcMsg{JSONRPC: "2.0", ID: id, Error: e})
+}
+
 // Notify 发一条无 id 的 notification（如 session/cancel），不等待响应。
 // 注意：notification 不能带 id——ACP 的 session/cancel 是 notification，
 // 带 id 的 request 形式会被 kimi 拒为 -32601 Method not found（实测 0.32.0）。
@@ -232,6 +240,11 @@ func (c *Client) readLoop(r io.Reader, myGen int64) {
 			if c.h.OnPermission != nil {
 				c.h.OnPermission(sid, m.ID, m.Params)
 			}
+		case m.Method == "fs/read_text_file" || m.Method == "fs/write_text_file":
+			// 我们未在 initialize 声明 fsCapabilities，kimi 应自行本地处理文件 I/O。
+			// 若 kimi 仍下发（如远程场景），按规范返回 methodNotFound，避免请求悬空。
+			log.Printf("[relay] 未实现的 reverse-RPC（未声明 fsCapabilities）: %s", m.Method)
+			_ = c.RespondError(m.ID, -32601, "Method not found: fs not advertised by sentinel-relay")
 		case m.Method != "":
 			// 其它 Kimi 发起的 request/notification，暂不处理。
 		default:

@@ -97,13 +97,15 @@ func (r *Relay) Start() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if _, err := r.acp.Request(ctx, "initialize", map[string]any{
+	initRes, err := r.acp.Request(ctx, "initialize", map[string]any{
 		"protocolVersion":    1,
 		"clientCapabilities": map[string]any{},
 		"clientInfo":         map[string]any{"name": "sentinel-relay", "version": "0.1"},
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
+	r.afterInitialize(ctx, initRes.Result)
 	r.kimiAlive = true
 	cwd, _ := os.Getwd()
 	if _, err := r.newSession(ctx, cwd); err != nil {
@@ -113,6 +115,40 @@ func (r *Relay) Start() error {
 		log.Printf("[relay] 启动拉取历史列表失败: %v", err)
 	}
 	return nil
+}
+
+// afterInitialize 在 initialize 成功后做的规范对齐动作：
+// 1) 记录 kimi 下发的 agentCapabilities / authMethods（ACP 规范要求 initialize 返回能力矩阵）；
+// 2) 补 authenticate 握手（method_id='login'）。已登录环境通常直接成功；
+//    返回 authRequired(-32000) 时 best-effort 忽略，不阻断启动（当前环境无需鉴权即可 session/new）。
+func (r *Relay) afterInitialize(ctx context.Context, res json.RawMessage) {
+	r.logAgentCapabilities(res)
+	actx, acancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer acancel()
+	if _, aerr := r.acp.Request(actx, "authenticate", map[string]any{"methodId": "login"}); aerr != nil {
+		log.Printf("[relay] authenticate 跳过（已登录或无需鉴权）: %v", aerr)
+	}
+}
+
+// logAgentCapabilities 把 initialize 响应里的能力矩阵与鉴权方式打到日志，便于对齐/排查。
+func (r *Relay) logAgentCapabilities(res json.RawMessage) {
+	var info struct {
+		AgentInfo    json.RawMessage `json:"agentInfo"`
+		Capabilities json.RawMessage `json:"capabilities"`
+		AuthMethods  json.RawMessage `json:"authMethods"`
+	}
+	if err := json.Unmarshal(res, &info); err != nil {
+		return
+	}
+	if len(info.AgentInfo) > 0 {
+		log.Printf("[relay] kimi agentInfo=%s", string(info.AgentInfo))
+	}
+	if len(info.Capabilities) > 0 {
+		log.Printf("[relay] kimi capabilities=%s", string(info.Capabilities))
+	}
+	if len(info.AuthMethods) > 0 {
+		log.Printf("[relay] kimi authMethods=%s", string(info.AuthMethods))
+	}
 }
 
 func (r *Relay) Close() {
@@ -343,14 +379,16 @@ func (r *Relay) restartKimi() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if _, err := r.acp.Request(ctx, "initialize", map[string]any{
+	initRes, err := r.acp.Request(ctx, "initialize", map[string]any{
 		"protocolVersion":    1,
 		"clientCapabilities": map[string]any{},
 		"clientInfo":         map[string]any{"name": "sentinel-relay", "version": "0.1"},
-	}); err != nil {
+	})
+	if err != nil {
 		r.sendErr("", "restart initialize: "+err.Error())
 		return
 	}
+	r.afterInitialize(ctx, initRes.Result)
 	for _, sid := range r.store.SIDs() {
 		cwd := r.store.CWD(sid)
 		m, err := r.acp.Request(ctx, "session/resume", map[string]any{"sessionId": sid, "cwd": cwd})
@@ -641,12 +679,9 @@ func (r *Relay) handleUp(c *client, data []byte) {
 			return
 		}
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			// 尽力关闭 Kimi 侧会话（ACP 不支持则忽略错误，端侧 tab 仍移除）。
-			if _, err := r.acp.Request(ctx, "session/close", map[string]any{"sessionId": sid}); err != nil {
-				log.Printf("[relay] session/close %s 失败（忽略）: %v", sid, err)
-			}
+			// ACP 规范（kimi-acp 文档「稳定面」清单）：kimi 未实现 session/close，
+			// 向其发该 RPC 必然 methodNotFound。故只做本地清理 + 通知端侧移除 tab，
+			// 不再发无意义的请求（此前每次关 tab 都会打一条失败日志）。
 			r.store.Remove(sid)
 			r.broadcast(Env{Type: DownSessionClosed, SessionID: sid})
 		}()
