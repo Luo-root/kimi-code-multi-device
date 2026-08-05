@@ -278,7 +278,14 @@ class _AgentGroupViewState extends State<AgentGroupView> {
             children: [
               Icon(AppIcons.thinking, size: 14, color: triggerColor),
               const SizedBox(width: 8),
-              Text(label, style: AppText.callout.copyWith(color: triggerColor)),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AppText.callout.copyWith(color: triggerColor),
+                ),
+              ),
               if (g.isRunning) ...[
                 const SizedBox(width: 6),
                 SizedBox(
