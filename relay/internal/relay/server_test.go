@@ -5,16 +5,17 @@ import (
 	"encoding/json"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
-	"strings"
 
-	acpsdk "github.com/coder/acp-go-sdk"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/bark"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/config"
+	"github.com/Luo-root/kimi-code-multi-device/relay/internal/kimiweb"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/permit"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/session"
+	acpsdk "github.com/coder/acp-go-sdk"
 )
 
 // ---- 测试辅助 ----
@@ -568,5 +569,154 @@ func TestHandleUp_ConfigSet(t *testing.T) {
 	// 应已写回文件。
 	if data, err := os.ReadFile(tmp.Name()); err != nil || !strings.Contains(string(data), "timeout_seconds") {
 		t.Fatalf("config.set 未写回文件: err=%v data=%q", err, string(data))
+	}
+}
+
+// ---- fake managementClient（T3 管理协议测试） ----
+
+type fakeMgmt struct {
+	mu         sync.Mutex
+	calls      []string
+	archiveErr error
+	restoreErr error
+	deleteErr  error
+	renameErr  error
+	forkNewID  string
+	forkErr    error
+	exportRes  *kimiweb.ExportResult
+	exportErr  error
+}
+
+func (f *fakeMgmt) Archive(ctx context.Context, sid string) error {
+	f.mu.Lock()
+	f.calls = append(f.calls, "Archive:"+sid)
+	f.mu.Unlock()
+	return f.archiveErr
+}
+func (f *fakeMgmt) Restore(ctx context.Context, sid string, opts *kimiweb.RestoreOpts) error {
+	f.mu.Lock()
+	f.calls = append(f.calls, "Restore:"+sid)
+	f.mu.Unlock()
+	return f.restoreErr
+}
+func (f *fakeMgmt) Delete(ctx context.Context, sid string) error {
+	f.mu.Lock()
+	f.calls = append(f.calls, "Delete:"+sid)
+	f.mu.Unlock()
+	return f.deleteErr
+}
+func (f *fakeMgmt) Fork(ctx context.Context, opts kimiweb.ForkOpts) (string, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, "Fork:"+opts.SourceSessionID)
+	f.mu.Unlock()
+	return f.forkNewID, f.forkErr
+}
+func (f *fakeMgmt) Rename(ctx context.Context, sid, title string) error {
+	f.mu.Lock()
+	f.calls = append(f.calls, "Rename:"+sid+":"+title)
+	f.mu.Unlock()
+	return f.renameErr
+}
+func (f *fakeMgmt) Export(ctx context.Context, sid string, opts kimiweb.ExportOpts) (*kimiweb.ExportResult, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, "Export:"+sid)
+	f.mu.Unlock()
+	return f.exportRes, f.exportErr
+}
+
+func mgmtCalled(f *fakeMgmt, want string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, c := range f.calls {
+		if c == want {
+			return true
+		}
+	}
+	return false
+}
+
+// recvManaged 从捕获通道取出 session.managed 回执并解析。
+func recvManaged(t *testing.T, capCh chan []byte) DownSessionManagedPayload {
+	t.Helper()
+	var p DownSessionManagedPayload
+	e := recvDown(t, capCh, DownSessionManaged)
+	if err := json.Unmarshal(e.Payload, &p); err != nil {
+		t.Fatalf("解析 session.managed 失败: %v", err)
+	}
+	return p
+}
+
+func TestHandleManageSession_NotEnabled(t *testing.T) {
+	r, capCh := newTestRelay(t)
+	r.handleManageSession(&client{send: capCh}, UpManageSessionPayload{Action: ManageActionArchive, SessionID: "s1"})
+	p := recvManaged(t, capCh)
+	if p.Ok {
+		t.Fatal("未启用应 ok=false")
+	}
+	if p.Error == "" {
+		t.Fatal("未启用应带错误信息")
+	}
+}
+
+func TestHandleManageSession_Archive(t *testing.T) {
+	r, capCh := newTestRelay(t)
+	r.acp = &fakeACP{} // 成功后 go listSessions 需要 acp.ListSessions
+	fm := &fakeMgmt{}
+	r.mgmt = fm
+	r.handleManageSession(&client{send: capCh}, UpManageSessionPayload{Action: ManageActionArchive, SessionID: "s1"})
+	p := recvManaged(t, capCh)
+	if !p.Ok {
+		t.Fatalf("archive 应成功，got err=%s", p.Error)
+	}
+	if p.Action != ManageActionArchive || p.SessionID != "s1" {
+		t.Fatalf("回执字段不匹配: %+v", p)
+	}
+	if !mgmtCalled(fm, "Archive:s1") {
+		t.Fatal("未调用 Archive")
+	}
+	// 成功后应广播刷新会话列表
+	recvDown(t, capCh, DownSessionList)
+}
+
+func TestHandleManageSession_RenameMissingTitle(t *testing.T) {
+	r, capCh := newTestRelay(t)
+	r.acp = &fakeACP{}
+	r.mgmt = &fakeMgmt{}
+	r.handleManageSession(&client{send: capCh}, UpManageSessionPayload{Action: ManageActionRename, SessionID: "s1"})
+	p := recvManaged(t, capCh)
+	if p.Ok {
+		t.Fatal("缺 title 应失败")
+	}
+}
+
+func TestHandleManageSession_UnknownAction(t *testing.T) {
+	r, capCh := newTestRelay(t)
+	r.acp = &fakeACP{}
+	r.mgmt = &fakeMgmt{}
+	r.handleManageSession(&client{send: capCh}, UpManageSessionPayload{Action: "whatever", SessionID: "s1"})
+	p := recvManaged(t, capCh)
+	if p.Ok {
+		t.Fatal("未知 action 应失败")
+	}
+}
+
+func TestHandleManageSession_Fork(t *testing.T) {
+	r, capCh := newTestRelay(t)
+	r.acp = &fakeACP{}
+	fm := &fakeMgmt{forkNewID: "s-new"}
+	r.mgmt = fm
+	r.handleManageSession(&client{send: capCh}, UpManageSessionPayload{Action: ManageActionFork, SessionID: "s1", Title: "copy"})
+	p := recvManaged(t, capCh)
+	if !p.Ok {
+		t.Fatalf("fork 应成功，got err=%s", p.Error)
+	}
+	var d struct {
+		NewSessionID string `json:"newSessionId"`
+	}
+	if err := json.Unmarshal(p.Data, &d); err != nil {
+		t.Fatalf("解析 fork data 失败: %v", err)
+	}
+	if d.NewSessionID != "s-new" {
+		t.Fatalf("fork 未返回新会话 id，got=%q", d.NewSessionID)
 	}
 }
