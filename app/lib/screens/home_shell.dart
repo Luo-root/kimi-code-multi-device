@@ -5,6 +5,7 @@ import 'package:hux/hux.dart';
 import 'package:flutter/services.dart';
 import '../relay/models.dart';
 import '../relay/relay_client.dart';
+import '../relay/manage_messages.dart';
 import '../relay/session_archive_store.dart';
 import '../relay/session_store.dart';
 import '../relay/session_view.dart';
@@ -149,6 +150,8 @@ class _HomeShellState extends State<HomeShell> {
   String? _slashQuery;
   /// 已 toast 过的 relay.error（去重，避免同一错误反复弹；恢复后重置）。§UX-7.2-3。
   String? _lastShownError;
+  /// 已 toast 过的 session.managed 回执实例（identical 去重，避免重复弹）。
+  ManagedResult? _lastShownManaged;
 
   @override
   void initState() {
@@ -256,6 +259,24 @@ class _HomeShellState extends State<HomeShell> {
       _showRelayError(err);
     } else if (_store.relayState == 'ok' && _lastShownError != null) {
       _lastShownError = null;
+    }
+    // 通道②：会话管理操作回执（archive/rename/fork/delete/restore/export）。
+    // 成功/失败统一弹非阻断 toast；每次新回执赋新实例，用 identical 去重。
+    final m = _store.lastManaged;
+    if (m != null && !identical(m, _lastShownManaged)) {
+      _lastShownManaged = m;
+      final label = _manageActionLabel(m.action);
+      if (m.ok) {
+        final msg = _manageOkMessage(m, label);
+        context.showHuxSnackbar(
+          message: msg,
+          variant: HuxSnackbarVariant.success,
+          // 导出/分叉带路径或新 ID，需要更长阅读时间。
+          duration: Duration(milliseconds: msg.length > 24 ? 3200 : 1600),
+        );
+      } else {
+        _showRelayError('$label失败：${m.error ?? "未知错误"}');
+      }
     }
     setState(() {});
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -429,6 +450,34 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
+  /// 管理操作成功/失败 toast 的中文动作标签。
+  /// 管理动作的名词化标签，供「已X」/「X失败」两种文案共用。
+  String _manageActionLabel(ManageAction a) => switch (a) {
+        ManageAction.archive => '归档',
+        ManageAction.restore => '恢复',
+        ManageAction.rename => '重命名',
+        ManageAction.fork => '分叉',
+        ManageAction.delete => '删除',
+        ManageAction.export => '导出',
+      };
+
+  /// 成功文案：fork/export 有返回值时带上关键结果，其余只报动作。
+  /// data 的键与 relay 侧一致（fork→newSessionId，export→zipPath）。
+  String _manageOkMessage(ManagedResult m, String label) {
+    final data = m.data;
+    if (data != null) {
+      if (m.action == ManageAction.fork) {
+        final nid = data['newSessionId']?.toString();
+        if (nid != null && nid.isNotEmpty) return '已分叉为新会话 $nid';
+      }
+      if (m.action == ManageAction.export) {
+        final zip = data['zipPath']?.toString();
+        if (zip != null && zip.isNotEmpty) return '已导出到 $zip';
+      }
+    }
+    return '已$label';
+  }
+
   // ---- 抽屉动作 ----
 
   /// 侧边栏点会话 = 切换，不是给主屏加一个可切换会话。
@@ -584,6 +633,7 @@ class _HomeShellState extends State<HomeShell> {
             child: _SessionDrawer(
               store: _store,
               archive: _archive,
+              client: _client,
               onPick: (m) {
                 Navigator.of(context).pop();
                 _openSession(m);
@@ -1518,6 +1568,9 @@ class _CascadeConfigMenuState extends State<_CascadeConfigMenu> {
 class _SessionDrawer extends StatefulWidget {
   final SessionStore store;
   final SessionArchiveStore archive;
+
+  /// 通道② 会话管理（重命名/分叉/导出/删除）需要经中枢下发，故抽屉需持有连接。
+  final RelayClient client;
   final ValueChanged<SessionMeta> onPick;
   final VoidCallback onNew;
   final VoidCallback onOpenSettings;
@@ -1525,6 +1578,7 @@ class _SessionDrawer extends StatefulWidget {
   const _SessionDrawer({
     required this.store,
     required this.archive,
+    required this.client,
     required this.onPick,
     required this.onNew,
     required this.onOpenSettings,
@@ -1843,7 +1897,7 @@ class _SessionDrawerState extends State<_SessionDrawer> {
               // 行内"…"菜单：复制 ID / 归档 / 等等。
               Padding(
                 padding: const EdgeInsets.only(right: 4),
-                child: _SessionRowMenu(meta: m),
+                child: _SessionRowMenu(client: widget.client, meta: m),
               ),
             ],
           ),
@@ -1854,12 +1908,18 @@ class _SessionDrawerState extends State<_SessionDrawer> {
 }
 
 /// 工作区抽屉的行内"…"菜单。
-/// 现阶段只有复制 ID 与归档是真实能力；其它（重命名/分叉/导出）等待 kimi
-/// acp 补 API（见 test/probe/session_list_probe_test gap #2），暂不在菜单
-/// 中显示，避免误导用户。
+///
+/// 两类语义刻意分开，避免"双写"歧义：
+/// - **重命名 / 分叉 / 导出 / 删除** → 通道②（kimi web 调试 RPC，经 relay 代理），
+///   改的是 kimi 侧真实状态。成败由中枢 `session.managed` 回执统一弹 toast
+///   （见 _onStore），本菜单只负责发请求、不自行弹结果，避免重复反馈。
+/// - **归档** → 端侧可见性集合（SessionArchiveStore，本地持久化），离线也可用，
+///   不触达 kimi。故它就地弹 toast。恢复入口在归档弹窗。
+/// - **复制 Session ID** → 纯本地。
 class _SessionRowMenu extends StatelessWidget {
+  final RelayClient client;
   final SessionMeta meta;
-  const _SessionRowMenu({required this.meta});
+  const _SessionRowMenu({required this.client, required this.meta});
 
   @override
   Widget build(BuildContext context) {
@@ -1878,10 +1938,21 @@ class _SessionRowMenu extends StatelessWidget {
           child: _SessionMenuItem(
               icon: AppIcons.copy, label: '复制 Session ID'),
         ),
-        // TODO(gap #2): 恢复重命名/分叉/导出菜单项，当 kimi acp 提供对应 API。
-        // PopupMenuItem(value: _RowMenuAction.rename, ...),
-        // PopupMenuItem(value: _RowMenuAction.fork, ...),
-        // PopupMenuItem(value: _RowMenuAction.export, ...),
+        PopupMenuItem(
+          value: _RowMenuAction.rename,
+          height: 36,
+          child: _SessionMenuItem(icon: AppIcons.rename, label: '重命名'),
+        ),
+        PopupMenuItem(
+          value: _RowMenuAction.fork,
+          height: 36,
+          child: _SessionMenuItem(icon: AppIcons.fork, label: '分叉会话'),
+        ),
+        PopupMenuItem(
+          value: _RowMenuAction.export,
+          height: 36,
+          child: _SessionMenuItem(icon: AppIcons.download, label: '导出会话'),
+        ),
         PopupMenuDivider(height: 1),
         PopupMenuItem(
           value: _RowMenuAction.archive,
@@ -1889,6 +1960,15 @@ class _SessionRowMenu extends StatelessWidget {
           child: _SessionMenuItem(
             icon: AppIcons.archive,
             label: '归档',
+            danger: true,
+          ),
+        ),
+        PopupMenuItem(
+          value: _RowMenuAction.delete,
+          height: 36,
+          child: _SessionMenuItem(
+            icon: AppIcons.remove,
+            label: '删除',
             danger: true,
           ),
         ),
@@ -1919,29 +1999,93 @@ class _SessionRowMenu extends StatelessWidget {
           );
         }
       case _RowMenuAction.rename:
+        _rename(rootCtx);
       case _RowMenuAction.fork:
+        client.send(kUpManageSession,
+            sid: meta.sessionId,
+            payload: buildManageRequest(ManageAction.fork, meta.sessionId,
+                title: meta.title.isEmpty ? null : meta.title));
       case _RowMenuAction.export:
-        // 等待 kimi acp 补 API（gap #2），暂以 toast 告知，避免空跑。
-        if (rootCtx.mounted) {
-          rootCtx.showHuxSnackbar(
-            message: '${_labelOf(a)} 即将支持',
-            variant: HuxSnackbarVariant.info,
-            duration: const Duration(milliseconds: 1500),
-          );
-        }
+        client.send(kUpManageSession,
+            sid: meta.sessionId,
+            payload: buildManageRequest(ManageAction.export, meta.sessionId));
+      case _RowMenuAction.delete:
+        _confirmDelete(rootCtx);
     }
   }
 
-  String _labelOf(_RowMenuAction a) => switch (a) {
-        _RowMenuAction.copyId => '复制 Session ID',
-        _RowMenuAction.rename => '重命名',
-        _RowMenuAction.fork => '分叉会话',
-        _RowMenuAction.export => '导出会话',
-        _RowMenuAction.archive => '归档',
-      };
+  /// 重命名：弹输入框拿新标题，发通道② rename。
+  void _rename(BuildContext ctx) {
+    final ctl = TextEditingController(text: meta.title);
+    showHuxDialog<bool>(
+      context: ctx,
+      title: '重命名会话',
+      content: TextField(
+        controller: ctl,
+        autofocus: true,
+        decoration: InputDecoration(
+          hintText: '输入新标题',
+          hintStyle: AppText.body.copyWith(color: AppColors.placeholderOf(ctx)),
+        ),
+        onSubmitted: (_) => Navigator.of(ctx).pop(true),
+      ),
+      actions: [
+        HuxButton(
+          onPressed: () => Navigator.of(ctx).pop(false),
+          variant: HuxButtonVariant.secondary,
+          child: Text('取消', style: AppText.calloutStrong),
+        ),
+        HuxButton(
+          onPressed: () => Navigator.of(ctx).pop(true),
+          child: Text('确定', style: AppText.calloutStrong),
+        ),
+      ],
+    ).then((ok) {
+      final title = ctl.text.trim();
+      ctl.dispose(); // 无论确认还是取消都要释放，避免 controller 泄漏。
+      if (ok == true && ctx.mounted && title.isNotEmpty && title != meta.title) {
+        client.send(kUpManageSession,
+            sid: meta.sessionId,
+            payload: buildManageRequest(ManageAction.rename, meta.sessionId,
+                title: title));
+      }
+    });
+  }
+
+  /// 删除：危险操作，二次确认后发通道② delete。
+  void _confirmDelete(BuildContext ctx) {
+    showHuxDialog<bool>(
+      context: ctx,
+      title: '删除会话',
+      content: Text(
+        '确定删除「${meta.title.isEmpty ? meta.sessionId : meta.title}」？\n该操作会移除本地会话目录，且无法撤销。',
+        style: AppText.body,
+      ),
+      actions: [
+        HuxButton(
+          onPressed: () => Navigator.of(ctx).pop(false),
+          variant: HuxButtonVariant.secondary,
+          child: Text('取消', style: AppText.calloutStrong),
+        ),
+        HuxButton(
+          onPressed: () => Navigator.of(ctx).pop(true),
+          // hux 无 danger 变体，用 primaryColor 承载危险语义。
+          primaryColor: AppColors.reject,
+          child: Text('删除', style: AppText.calloutStrong),
+        ),
+      ],
+    ).then((ok) {
+      if (ok == true && ctx.mounted) {
+        client.send(kUpManageSession,
+            sid: meta.sessionId,
+            payload: buildManageRequest(ManageAction.delete, meta.sessionId));
+      }
+    });
+  }
+
 }
 
-enum _RowMenuAction { copyId, rename, fork, export, archive }
+enum _RowMenuAction { copyId, rename, fork, export, archive, delete }
 
 class _SessionMenuItem extends StatelessWidget {
   final IconData icon;
@@ -1963,9 +2107,10 @@ class _SessionMenuItem extends StatelessWidget {
   }
 }
 
-/// 工作区分组头的「…」菜单：复制工作区路径 / 归档该工作区 / 重命名 / 移除工作区。
-/// 仅「复制路径」与「归档」是真实能力，其余等 kimi acp 补 API（见
-/// test/probe/session_list_probe_test gap #2），暂不在菜单中显示，避免误导用户。
+/// 工作区分组头的「…」菜单：复制工作区路径 / 归档该工作区。
+/// 「复制路径」与「归档工作区」（批量归档该组下全部会话）是真实能力。
+/// 工作区「重命名 / 移除」是抽屉的分组概念，kimi web 的会话管理（通道②）并不
+/// 暴露对应操作，故保持隐藏——这不是待补的 gap，而是本就无后端语义。
 class _GroupMenu extends StatelessWidget {
   final String workspaceKey; // sessionGroupKey（路径末两级）
   final List<String> sessionIds; // 该工作区当前可见（未归档）会话的 sid
@@ -1992,10 +2137,9 @@ class _GroupMenu extends StatelessWidget {
           height: 36,
           child: _SessionMenuItem(icon: AppIcons.archive, label: '归档工作区'),
         ),
-        // TODO(gap #2): 恢复重命名/移除工作区菜单项，当 kimi acp 提供对应 API。
-        // const PopupMenuItem(value: _GroupMenuAction.rename, ...),
-        // const PopupMenuDivider(height: 1),
-        // const PopupMenuItem(value: _GroupMenuAction.remove, ...),
+        // 「重命名 / 移除工作区」故意不展示：工作区是端侧按 cwd 末两级聚合出来的
+        // 视图概念，kimi 侧只有「会话」实体，通道② 也无对应 RPC。若要支持，需要
+        // 端侧自建工作区元数据存储，属独立特性而非本通道的缺口。
       ],
       onSelected: (a) => _onSelected(context, a),
       child: SizedBox(
