@@ -25,8 +25,10 @@ abstract final class AppIcons {
   static const IconData thinking = LucideIcons.sparkles; // 思考强度
   static const IconData command = LucideIcons.command; // slash 命令菜单
   static const IconData search = LucideIcons.search; // 抽屉搜索
-  static const IconData rename = LucideIcons.pencil; // 重命名工作区
+  static const IconData rename = LucideIcons.pencil; // 重命名工作区 / 会话
   static const IconData remove = LucideIcons.trash_2; // 移除工作区
+  static const IconData fork = LucideIcons.git_fork; // 分叉会话
+  static const IconData download = LucideIcons.download; // 导出会话
   
   // 会话模式（哨兵在不在场）
   static const IconData modeManual = LucideIcons.shield;
