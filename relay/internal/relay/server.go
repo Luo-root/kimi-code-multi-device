@@ -14,14 +14,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	acpsdk "github.com/coder/acp-go-sdk"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/acp"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/bark"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/config"
+	"github.com/Luo-root/kimi-code-multi-device/relay/internal/kimiweb"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/permit"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/replay"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/risk"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/session"
+	acpsdk "github.com/coder/acp-go-sdk"
 	"github.com/gorilla/websocket"
 )
 
@@ -66,11 +67,16 @@ type Relay struct {
 	// kimi 健康（§08 ⑥ 心跳）：false=degraded。OnExit 置 false，Restart 置 true。
 	kimiAlive bool
 
+	// mgmt 是「通道② 本机管理通道」客户端（kimi web HTTP 调试 RPC），
+	// 补齐 ACP 未覆盖的会话管理。nil = 未启用（配置关闭或无可用端点）。
+	mgmt      *kimiweb.Client
+	mgmtSpawn *kimiweb.SpawnProvider // 仅当 auto_start 时非空，Close 时清理子进程
+
 	// 权限等待表：manual 模式下 OnPermission 同步阻塞，直到端侧拍板 / 超时 / kimi 退出。
 	// key 为中继生成的 permID（json.RawMessage 形式下发给端侧，端侧原样回传）。
-	permMu     sync.Mutex
+	permMu      sync.Mutex
 	permWaiters map[string]chan permOutcome
-	permSeq    atomic.Int64
+	permSeq     atomic.Int64
 
 	mu      sync.RWMutex
 	clients map[*client]bool
@@ -114,7 +120,43 @@ func New() *Relay {
 		permWaiters:         map[string]chan permOutcome{},
 	}
 	r.permit = permit.New(r.onPermTimeout)
+	r.initManagement()
 	return r
+}
+
+// initManagement 依据配置装配「通道② 本机管理通道」客户端（kimi web 调试 RPC）。
+// 配置关闭时 mgmt 保持 nil，后续管理类请求将返回明确错误。
+// auto_start 走 SpawnProvider（懒启动，首次管理调用才拉起 kimi web）。
+func (r *Relay) initManagement() {
+	kw := r.cfg.KimiWeb
+	if !kw.Enabled {
+		return
+	}
+	if kw.AutoStart {
+		// 管理 RPC 必须 --debug-endpoints；relay 代启时强制开启。
+		sp := &kimiweb.SpawnProvider{
+			DebugEndpoints: true,
+			Port:           kw.Port,
+		}
+		r.mgmtSpawn = sp
+		r.mgmt = kimiweb.New(sp)
+		log.Printf("[relay] 管理通道：auto_start kimi web（首次调用时拉起，端口 %d）", kw.Port)
+		return
+	}
+	if kw.BaseURL != "" {
+		r.mgmt = kimiweb.New(kimiweb.StaticProvider{BaseURL: kw.BaseURL, Token: kw.Token})
+		log.Printf("[relay] 管理通道：直连 kimi web %s", kw.BaseURL)
+		return
+	}
+	log.Printf("[relay] 管理通道已 enabled 但缺少 base_url 或 auto_start，管理功能不可用")
+}
+
+// management 返回管理客户端；未启用时返回错误，供上层（T3 协议）转译为端侧提示。
+func (r *Relay) management() (*kimiweb.Client, error) {
+	if r.mgmt == nil {
+		return nil, fmt.Errorf("kimi web 管理通道未启用（relay.toml [kimiweb] enabled=true 并配置 base_url/token 或 auto_start）")
+	}
+	return r.mgmt, nil
 }
 
 func (r *Relay) Start() error {
@@ -152,9 +194,9 @@ func (r *Relay) Start() error {
 }
 
 // afterInitialize 在 initialize 成功后做的规范对齐动作：
-// 1) 记录 kimi 下发的 agentCapabilities / authMethods（ACP 规范要求 initialize 返回能力矩阵）；
-// 2) 补 authenticate 握手（method_id='login'）。已登录环境通常直接成功；
-//    返回 authRequired(-32000) 时 best-effort 忽略，不阻断启动（当前环境无需鉴权即可 session/new）。
+//  1. 记录 kimi 下发的 agentCapabilities / authMethods（ACP 规范要求 initialize 返回能力矩阵）；
+//  2. 补 authenticate 握手（method_id='login'）。已登录环境通常直接成功；
+//     返回 authRequired(-32000) 时 best-effort 忽略，不阻断启动（当前环境无需鉴权即可 session/new）。
 func (r *Relay) afterInitialize(ctx context.Context, res acpsdk.InitializeResponse) {
 	r.logAgentCapabilities(res)
 	if err := r.authenticate(ctx); err != nil {
@@ -191,6 +233,9 @@ func (r *Relay) logAgentCapabilities(res acpsdk.InitializeResponse) {
 func (r *Relay) Close() {
 	if r.acp != nil {
 		r.acp.Close()
+	}
+	if r.mgmtSpawn != nil {
+		_ = r.mgmtSpawn.Close()
 	}
 }
 
