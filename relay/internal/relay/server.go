@@ -139,14 +139,20 @@ func (r *Relay) initManagement() {
 		return
 	}
 	if kw.AutoStart {
-		// 管理 RPC 必须 --debug-endpoints；relay 代启时强制开启。
+		// 管理动作走 REST :action（磁盘直读），实测**不需要** --debug-endpoints，
+		// 故不再强制开启，仅在配置显式要求时透传（用于 /api/v1/debug/* 调试面）。
 		sp := &kimiweb.SpawnProvider{
-			DebugEndpoints: true,
+			DebugEndpoints: kw.DebugEndpoints,
 			Port:           kw.Port,
+			Token:          kw.Token,
 		}
 		r.mgmtSpawn = sp
 		r.mgmt = kimiweb.New(sp)
-		log.Printf("[relay] 管理通道：auto_start kimi web（首次调用时拉起，端口 %d）", kw.Port)
+		port := kw.Port
+		if port == 0 {
+			port = kimiweb.DefaultPort
+		}
+		log.Printf("[relay] 管理通道：auto_start kimi web（首次调用时优先复用已运行实例，端口 %d）", port)
 		return
 	}
 	if kw.BaseURL != "" {
@@ -868,26 +874,26 @@ func (r *Relay) handleManageSession(c *client, p UpManageSessionPayload) {
 	}
 	mgmt, err := r.management()
 	if err != nil {
-		reply(false, err.Error(), nil)
+		reply(false, enrichMgmtErr(err), nil)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	switch p.Action {
 	case ManageActionArchive:
 		if err := mgmt.Archive(ctx, sid); err != nil {
-			reply(false, err.Error(), nil)
+			reply(false, enrichMgmtErr(err), nil)
 			return
 		}
 	case ManageActionRestore:
 		if err := mgmt.Restore(ctx, sid, nil); err != nil {
-			reply(false, err.Error(), nil)
+			reply(false, enrichMgmtErr(err), nil)
 			return
 		}
 	case ManageActionDelete:
 		if err := mgmt.Delete(ctx, sid); err != nil {
-			reply(false, err.Error(), nil)
+			reply(false, enrichMgmtErr(err), nil)
 			return
 		}
 	case ManageActionRename:
@@ -896,7 +902,7 @@ func (r *Relay) handleManageSession(c *client, p UpManageSessionPayload) {
 			return
 		}
 		if err := mgmt.Rename(ctx, sid, p.Title); err != nil {
-			reply(false, err.Error(), nil)
+			reply(false, enrichMgmtErr(err), nil)
 			return
 		}
 	case ManageActionFork:
@@ -906,7 +912,7 @@ func (r *Relay) handleManageSession(c *client, p UpManageSessionPayload) {
 			NewSessionID:    p.NewSessionID,
 		})
 		if err != nil {
-			reply(false, err.Error(), nil)
+			reply(false, enrichMgmtErr(err), nil)
 			return
 		}
 		reply(true, "", mustJSON(struct {
@@ -930,7 +936,7 @@ func (r *Relay) handleManageSession(c *client, p UpManageSessionPayload) {
 		}
 		res, err := mgmt.Export(ctx, sid, opts)
 		if err != nil {
-			reply(false, err.Error(), nil)
+			reply(false, enrichMgmtErr(err), nil)
 			return
 		}
 		reply(true, "", mustJSON(res))
@@ -950,4 +956,31 @@ func (r *Relay) kimiVersionLocked() string {
 	r.verMu.RLock()
 	defer r.verMu.RUnlock()
 	return r.kimiVersion
+}
+
+// enrichMgmtErr 把管理通道的错误转译为端侧可懂的提示。
+//
+// kimi 的原始错误对用户完全不可自解释，这里把三类高频错误翻成可操作的中文：
+//   - 50001 storage write failed：另有 kimi web 持有会话存储的独占写锁（单写者约束）。
+//     典型场景是用户自己开着 kimi web，relay 又起了第二个实例。
+//   - 40401 session not found：会话未加载进 kimi web 运行时（仅调试 RPC 路径会遇到；
+//     REST :action 走磁盘直读，正常不会命中）。
+//   - ErrUnsupported：kimi 该版本压根没提供此动作的接口（rename/delete）。
+func enrichMgmtErr(err error) string {
+	if errors.Is(err, kimiweb.ErrUnsupported) {
+		// 端侧已按 kKimiUnsupportedActions 在菜单禁用并提示，理论上不会走到这里；
+		// 若仍触发（例如未来协议扩展），给一条干净、不含内部前缀的中文说明。
+		return "当前 kimi 版本未提供该管理动作的接口，操作无法执行"
+	}
+	if re, ok := kimiweb.IsRPCError(err); ok {
+		switch re.Code {
+		case kimiweb.CodeStorageWriteFailed:
+			return "检测到另一个 kimi web 正在运行并占用会话存储的写锁，操作被拒绝。" +
+				"kimi 同一时刻只允许一个进程写会话数据，请关闭其他 kimi web 后重试。(" + err.Error() + ")"
+		case kimiweb.CodeSessionNotFound:
+			return "kimi 未能找到该会话（可能已被删除，或未加载进 kimi web 运行时）。" +
+				"请刷新会话列表后重试。(" + err.Error() + ")"
+		}
+	}
+	return err.Error()
 }

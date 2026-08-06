@@ -49,6 +49,21 @@ void main() {
     });
   });
 
+  group('kKimiUnsupportedActions', () {
+    test('仅 delete 在不支持集合内，其余（含已支持的 rename）不在', () {
+      // 锁住 kimi 0.32.0 的能力边界：端侧据此在菜单禁用并提示，不发起请求。
+      // 重命名（rename）已确认可用（POST /profile），故不在集合内；
+      // 删除（delete）仍无磁盘接口，留在集合内。若未来 kimi 补上删除接口，
+      // 从集合移除该项即自动放开。
+      expect(kKimiUnsupportedActions, isNot(contains(ManageAction.rename)));
+      expect(kKimiUnsupportedActions, contains(ManageAction.delete));
+      expect(kKimiUnsupportedActions, isNot(contains(ManageAction.archive)));
+      expect(kKimiUnsupportedActions, isNot(contains(ManageAction.restore)));
+      expect(kKimiUnsupportedActions, isNot(contains(ManageAction.fork)));
+      expect(kKimiUnsupportedActions, isNot(contains(ManageAction.export)));
+    });
+  });
+
   group('ManagedResult.fromPayload', () {
     test('成功回执', () {
       final r = ManagedResult.fromPayload(

@@ -27,6 +27,21 @@ enum ManageAction {
       values.firstWhere((e) => e.value == v, orElse: () => archive);
 }
 
+/// 当前 kimi web（0.32.0）在 REST 管理面**未提供磁盘直读接口**的动作。
+///
+/// 实测 `delete` 无磁盘接口：`:delete` 返回 40001 unsupported action，
+/// `DELETE /api/v1/sessions/{id}` 是 404 路由未找到；唯一的调试 RPC 需会话已
+/// 加载进 kimi web 运行时，对 relay 代启的实例不可用。relay 侧 [managementClient]
+/// 的 Delete 直接返回 ErrUnsupported，端侧据此在菜单里禁用并提示，不发起任何请求。
+///
+/// 注意：重命名（rename）已确认可用——浏览器 UI 的「重命名」走
+/// `POST /api/v1/sessions/{id}/profile`（`{"title": ...}`），同样是磁盘直读、
+/// 不要求会话在 kimi web 运行时已激活，故已不在本集合中。未来 kimi 补上删除接口后，
+/// 从本集合移除该项即可自动放开，无需改协议。
+const Set<ManageAction> kKimiUnsupportedActions = {
+  ManageAction.delete,
+};
+
 /// 构造上行 session.manage 的 payload。
 ///
 /// - [action] 管理动作。

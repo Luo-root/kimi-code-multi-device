@@ -76,4 +76,5 @@ abstract final class AppIcons {
   // 批准卡
   static const IconData clock = LucideIcons.clock; // 倒计时
   static const IconData alertTriangle = LucideIcons.triangle_alert; // 超时警示
+  static const IconData info = LucideIcons.info; // 中性提示（toast）
 }

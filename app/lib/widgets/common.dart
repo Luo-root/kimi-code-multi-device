@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:hux/hux.dart';
 import 'package:flutter/services.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
@@ -8,16 +7,264 @@ import '../theme/app_dimens.dart';
 import '../theme/app_shadows.dart';
 import '../theme/app_icons.dart';
 
-/// 复制到剪贴板并给出轻量 toast 反馈（hux 语义色）。供消息 / 代码块 / 命令复制复用。
+/// 复制到剪贴板并给出轻量 toast 反馈。供消息 / 代码块 / 命令复制复用。
 void copyToClipboard(BuildContext context, String text) {
   if (text.isEmpty) return;
   Clipboard.setData(ClipboardData(text: text));
   HapticFeedback.selectionClick(); // §UX-8.2-2：复制 = .selection。
-  context.showHuxSnackbar(
-    message: '已复制',
-    variant: HuxSnackbarVariant.success,
-    duration: const Duration(milliseconds: 1400),
+  showAppToast(context, message: '已复制', variant: AppToastVariant.success);
+}
+
+// ---------------------------------------------------------------------------
+// 应用级 toast
+// ---------------------------------------------------------------------------
+
+/// toast 语义变体，只决定图标与强调色，不改变版式。
+enum AppToastVariant { success, info, warning, error }
+
+/// toast 卡片宽度。hux 内置 snackbar 把宽度硬编码成 400，短文案（如「已复制」）
+/// 会拉出一条过长的横条；这里取其三分之二，短提示不再霸屏。
+const double _kToastWidth = 268;
+
+/// toast 卡片的 widget key，供回归测试断言宽度与生命周期。
+const String kAppToastCardKey = 'appToastCard';
+
+/// 变体默认停留时长。成功类最短（信息量小），错误类最长（需要读完）。
+Duration _toastDuration(AppToastVariant v) => switch (v) {
+      AppToastVariant.success => const Duration(milliseconds: 1000),
+      AppToastVariant.info => const Duration(milliseconds: 1400),
+      AppToastVariant.warning => const Duration(milliseconds: 1600),
+      AppToastVariant.error => const Duration(milliseconds: 2000),
+    };
+
+/// 弹出一条轻量 toast。
+///
+/// 为什么不用 hux 的 `showHuxSnackbar` / `HuxSnackbarStackController`：
+/// 1) `showHuxSnackbar` 走 ScaffoldMessenger，画在 Scaffold 内部，抽屉打开时会被遮住；
+/// 2) hux 的卡片宽度硬编码 400，且无法从外部约束（宽度写死在其私有 body 里）。
+/// 这里自建 root overlay toast：既浮在最上层（抽屉 / 弹层之上），又能控制宽度与时长。
+///
+/// 同一时刻只保留一条：新 toast 直接顶掉旧的，避免连点堆成一摞。
+void showAppToast(
+  BuildContext context, {
+  required String message,
+  AppToastVariant variant = AppToastVariant.info,
+  Duration? duration,
+  String? actionLabel,
+  VoidCallback? onAction,
+}) {
+  final overlay = Overlay.maybeOf(context, rootOverlay: true);
+  if (overlay == null) return; // 测试或未挂载场景下静默降级。
+  showAppToastOn(
+    overlay,
+    message: message,
+    variant: variant,
+    duration: duration,
+    actionLabel: actionLabel,
+    onAction: onAction,
   );
+}
+
+/// 与 [showAppToast] 等价，但直接接收 [OverlayState]。
+/// 用于 `await` 之后不便再持有 BuildContext 的异步回退路径
+/// （先在 await 前捕获 overlay，await 后再弹）。
+void showAppToastOn(
+  OverlayState overlay, {
+  required String message,
+  AppToastVariant variant = AppToastVariant.info,
+  Duration? duration,
+  String? actionLabel,
+  VoidCallback? onAction,
+}) {
+  _AppToastHost.dismissCurrent();
+  late OverlayEntry entry;
+  entry = OverlayEntry(
+    builder: (_) => _AppToastView(
+      message: message,
+      variant: variant,
+      duration: duration ?? _toastDuration(variant),
+      actionLabel: actionLabel,
+      onAction: onAction,
+      onFinished: () => _AppToastHost.remove(entry),
+    ),
+  );
+  _AppToastHost.current = entry;
+  overlay.insert(entry);
+}
+
+/// 单槽 toast 宿主：只记录当前那条 OverlayEntry，便于「新的顶掉旧的」。
+abstract final class _AppToastHost {
+  static OverlayEntry? current;
+
+  static void dismissCurrent() => remove(current);
+
+  static void remove(OverlayEntry? entry) {
+    if (entry == null) return;
+    if (identical(current, entry)) current = null;
+    if (entry.mounted) entry.remove();
+  }
+}
+
+class _AppToastView extends StatefulWidget {
+  final String message;
+  final AppToastVariant variant;
+  final Duration duration;
+  final String? actionLabel;
+  final VoidCallback? onAction;
+  final VoidCallback onFinished;
+
+  const _AppToastView({
+    required this.message,
+    required this.variant,
+    required this.duration,
+    required this.actionLabel,
+    required this.onAction,
+    required this.onFinished,
+  });
+
+  @override
+  State<_AppToastView> createState() => _AppToastViewState();
+}
+
+class _AppToastViewState extends State<_AppToastView>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 140),
+  );
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _c.forward();
+    _timer = Timer(widget.duration, _dismiss);
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _c.dispose();
+    super.dispose();
+  }
+
+  Future<void> _dismiss() async {
+    _timer?.cancel();
+    if (!mounted) return;
+    try {
+      await _c.reverse();
+    } catch (_) {
+      // 退出动画期间宿主被顶掉 → controller 已 dispose，忽略。
+      return;
+    }
+    if (mounted) widget.onFinished();
+  }
+
+  Color _accent(BuildContext c) => switch (widget.variant) {
+        AppToastVariant.success => AppColors.approve,
+        AppToastVariant.info => AppColors.accentOf(c),
+        AppToastVariant.warning => AppColors.warning,
+        AppToastVariant.error => AppColors.reject,
+      };
+
+  IconData get _icon => switch (widget.variant) {
+        AppToastVariant.success => AppIcons.check,
+        AppToastVariant.info => AppIcons.info,
+        AppToastVariant.warning => AppIcons.alertTriangle,
+        AppToastVariant.error => AppIcons.alertTriangle,
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = _accent(context);
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 0,
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(AppSpacing.pageMargin),
+          child: Align(
+            alignment: Alignment.bottomLeft,
+            child: FadeTransition(
+              opacity: _c,
+              child: SlideTransition(
+                position: Tween<Offset>(
+                  begin: const Offset(0, 0.3),
+                  end: Offset.zero,
+                ).animate(
+                    CurvedAnimation(parent: _c, curve: Curves.easeOutCubic)),
+                child: _card(context, accent),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _card(BuildContext context, Color accent) {
+    // Overlay 里没有 Material 祖先时，DefaultTextStyle 会回落到 Flutter 的调试样式
+    // （红字 + 黄色双下划线）。Text.style 是 merge 语义，未显式声明的 decoration
+    // 仍会继承那份 fallback，于是文案下方出现黄色下划线。
+    // 透明 Material 提供正常的 DefaultTextStyle，且不绘制任何背景/阴影，
+    // 卡片自身的 surface/hairline/popup 阴影完全不受影响。
+    return Material(
+      type: MaterialType.transparency,
+      child: Container(
+        key: const ValueKey(kAppToastCardKey),
+        width: _kToastWidth,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: AppColors.surfaceOf(context),
+          borderRadius: BorderRadius.circular(AppRadius.popup),
+          border: Border.all(color: AppColors.hairlineOf(context)),
+          boxShadow: AppShadows.popup,
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Icon(_icon, size: 16, color: accent),
+            const SizedBox(width: AppSpacing.sm),
+            Expanded(
+              child: Text(
+                widget.message,
+                // decoration 显式置空：即便未来 toast 被挂到缺少 Theme 的宿主下，
+                // 也不会再继承调试用的黄色双下划线（与上方 Material 互为双保险）。
+                style: AppText.callout.copyWith(
+                  color: AppColors.textPrimaryOf(context),
+                  decoration: TextDecoration.none,
+                ),
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            if (widget.actionLabel != null) ...[
+              const SizedBox(width: AppSpacing.sm),
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () {
+                  widget.onAction?.call();
+                  _dismiss();
+                },
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                  child: Text(
+                    widget.actionLabel!,
+                    style: AppText.calloutStrong.copyWith(
+                      color: AppColors.accentOf(context),
+                      decoration: TextDecoration.none,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 /// §UX-2.2 复制按钮：复制成功后图标就地变勾 1.5s（不再用 SnackBar）。
@@ -248,7 +495,13 @@ class PopupAnimatorState extends State<PopupAnimator>
             child: ScaleTransition(
               scale: _scale,
               alignment: widget.origin,
-              child: widget.child,
+              // 弹层挂在 Overlay 上，不在 Scaffold 的 Material 子树内，
+              // DefaultTextStyle 会回落到 Flutter 的调试样式（红字 + 黄色双下划线）。
+              // 在此统一兜住，所有走 PopupAnimator 的弹层都无需各自包 Material。
+              child: Material(
+                type: MaterialType.transparency,
+                child: widget.child,
+              ),
             ),
           ),
         ),
