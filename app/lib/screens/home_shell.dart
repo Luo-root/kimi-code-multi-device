@@ -1985,6 +1985,8 @@ class _SessionRowMenu extends StatelessWidget {
   void _onSelected(BuildContext context, _RowMenuAction a) {
     final rootCtx = context;
     final archive = SessionArchiveStoreScope.of(rootCtx);
+    final store = SessionStoreScope.of(rootCtx);
+    final mgmtEnabled = store.relayConfig?.mgmtEnabled == true;
     switch (a) {
       case _RowMenuAction.copyId:
         copyToClipboard(rootCtx, meta.sessionId);
@@ -1999,19 +2001,35 @@ class _SessionRowMenu extends StatelessWidget {
           );
         }
       case _RowMenuAction.rename:
+        if (!_checkMgmtEnabled(rootCtx, mgmtEnabled)) return;
         _rename(rootCtx);
       case _RowMenuAction.fork:
+        if (!_checkMgmtEnabled(rootCtx, mgmtEnabled)) return;
         client.send(kUpManageSession,
             sid: meta.sessionId,
             payload: buildManageRequest(ManageAction.fork, meta.sessionId,
                 title: meta.title.isEmpty ? null : meta.title));
       case _RowMenuAction.export:
+        if (!_checkMgmtEnabled(rootCtx, mgmtEnabled)) return;
         client.send(kUpManageSession,
             sid: meta.sessionId,
             payload: buildManageRequest(ManageAction.export, meta.sessionId));
       case _RowMenuAction.delete:
+        if (!_checkMgmtEnabled(rootCtx, mgmtEnabled)) return;
         _confirmDelete(rootCtx);
     }
+  }
+
+  bool _checkMgmtEnabled(BuildContext ctx, bool enabled) {
+    if (enabled) return true;
+    if (ctx.mounted) {
+      ctx.showHuxSnackbar(
+        message: '管理通道未启用：请在 relay.toml 的 [kimiweb] 段设置 enabled=true',
+        variant: HuxSnackbarVariant.info,
+        duration: const Duration(milliseconds: 3000),
+      );
+    }
+    return false;
   }
 
   /// 重命名：弹输入框拿新标题，发通道② rename。

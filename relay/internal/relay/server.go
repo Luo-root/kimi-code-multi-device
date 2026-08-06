@@ -605,6 +605,7 @@ func (r *Relay) relayConfigLocked() DownRelayConfigPayload {
 		PermTimeoutSeconds:  r.cfg.Permission.TimeoutSeconds,
 		AutoPassNonCritical: r.cfg.Permission.AutoPassNonCritical,
 		ConfigPath:          r.cfgPath,
+		MgmtEnabled:         r.mgmt != nil,
 	}
 }
 
@@ -849,7 +850,9 @@ func mustJSON(v any) json.RawMessage {
 // 结果定向回给发起端 c；成功后广播刷新会话列表，使所有端看到最新状态。
 func (r *Relay) handleManageSession(c *client, p UpManageSessionPayload) {
 	sid := p.SessionID
+	log.Printf("[relay] session.manage action=%s sessionId=%s", p.Action, sid)
 	reply := func(ok bool, errMsg string, data json.RawMessage) {
+		log.Printf("[relay] session.managed action=%s sessionId=%s ok=%v error=%q", p.Action, sid, ok, errMsg)
 		r.sendBlocking(c, Env{
 			Type:      DownSessionManaged,
 			SessionID: sid,

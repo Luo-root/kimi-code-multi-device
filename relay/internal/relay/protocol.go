@@ -113,6 +113,7 @@ type DownRelayConfigPayload struct {
 	PermTimeoutSeconds  int    `json:"permTimeoutSeconds"`
 	AutoPassNonCritical bool   `json:"autoPassNonCritical"`
 	ConfigPath          string `json:"configPath,omitempty"` // 配置文件位置，端侧展示
+	MgmtEnabled         bool   `json:"mgmtEnabled"`          // 通道② 本机管理通道是否已启用
 }
 type DownSessionBusyPayload struct {
 	Busy bool `json:"busy"`
