@@ -105,9 +105,10 @@ func TestE2E_Export(t *testing.T) {
 	t.Logf("Export 成功: %s (%d 字节)", res.ZipPath, st.Size())
 }
 
-// TestE2E_DeleteStillUnsupported 验证 kimi 0.32.0 仍未提供删除接口。
-// 注意：重命名（rename）已确认可用（走 POST /profile，见 TestRename_UsesRESTProfile
-// 与 relay server.go 的 ManageActionRename 派发），故此处只校验 delete。
+// TestE2E_DeleteStillUnsupported 验证 kimi 0.32.0 的 HTTP :delete 仍不可用。
+// 注意：本包 Delete 现已改为 direct-storage 删除（关闭 kimi web 后直接删存储目录 +
+// 清理 session_index.jsonl），不再依赖 :delete 接口。此 e2e 仅作旁证：直接打 :delete
+// 仍应失败，说明我们绕开它走存储直删是正确路线。rename 已确认可用（走 POST /profile）。
 func TestE2E_DeleteStillUnsupported(t *testing.T) {
 	c := e2e(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -115,10 +116,10 @@ func TestE2E_DeleteStillUnsupported(t *testing.T) {
 
 	sid := e2eFirstSessionID(ctx, t, c)
 
-	// 直接打 :delete，绕过本包的 ErrUnsupported 短路，确认 kimi 侧仍未提供删除接口。
+	// 直接打 :delete，确认 kimi 侧仍未提供删除接口（这正是不走 HTTP、改 direct-storage 的原因）。
 	_, err := c.sessionAction(ctx, sid, "delete", nil)
 	if err == nil {
-		t.Errorf("kimi 现在支持 :delete 了！应更新 client.go 放开删除动作")
+		t.Errorf("kimi 现在支持 :delete 了！可改为走 :delete 而非 direct-storage")
 	}
 	t.Logf(":delete 仍不支持 -> %v", err)
 }

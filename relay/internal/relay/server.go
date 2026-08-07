@@ -965,12 +965,16 @@ func (r *Relay) kimiVersionLocked() string {
 //     典型场景是用户自己开着 kimi web，relay 又起了第二个实例。
 //   - 40401 session not found：会话未加载进 kimi web 运行时（仅调试 RPC 路径会遇到；
 //     REST :action 走磁盘直读，正常不会命中）。
-//   - ErrUnsupported：kimi 该版本压根没提供此动作的接口（rename/delete）。
+//   - ErrUnsupported：kimi 该版本压根没提供此动作的接口（当前 rename/delete 均已
+//     有实现路径，此分支作为未来接口回退时的兜底，一般不再触发）。
 func enrichMgmtErr(err error) string {
 	if errors.Is(err, kimiweb.ErrUnsupported) {
 		// 端侧已按 kKimiUnsupportedActions 在菜单禁用并提示，理论上不会走到这里；
 		// 若仍触发（例如未来协议扩展），给一条干净、不含内部前缀的中文说明。
 		return "当前 kimi 版本未提供该管理动作的接口，操作无法执行"
+	}
+	if errors.Is(err, replay.ErrSessionNotFound) {
+		return "该会话不存在或已被删除，请刷新会话列表后重试。"
 	}
 	if re, ok := kimiweb.IsRPCError(err); ok {
 		switch re.Code {

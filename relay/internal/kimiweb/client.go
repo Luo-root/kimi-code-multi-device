@@ -28,8 +28,10 @@
 //
 //	archive / restore / fork / export  -> REST :action 可用
 //	rename                             -> REST /profile 可用（浏览器 UI 的「重命名」即走此端点）
-//	delete                             -> 无磁盘直读方法（:delete 回 40001 unsupported
-//	                                      action；DELETE 是 404 路由未找到）。本包返回 ErrUnsupported。
+//	delete                             -> 无磁盘直读接口（:delete 回 40001 unsupported action、
+//	                                      DELETE /sessions/{id} 是 404 路由未找到），故本包改走 direct-storage
+//	                                      删除：直接删存储目录 + 清理 session_index.jsonl 索引。kimi web 运行时
+//	                                      亦可删（实测手动删文件夹未触发写锁冲突），不做端口占用护栏。
 //
 // # 单写者约束（重要）
 //
@@ -55,6 +57,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Luo-root/kimi-code-multi-device/relay/internal/replay"
 )
 
 // 调试 RPC 的基础路径（不含 host/port）。
@@ -120,15 +124,16 @@ func IsRPCError(err error) (*RPCError, bool) {
 	return nil, false
 }
 
-// Client 封装对 kimi web 调试 RPC 的调用。
+// Client 封装对 kimi web 的调用（管理动作走 REST :action，删除会话走本地存储直删）。
 type Client struct {
-	ep EndpointProvider
-	hc *http.Client
+	ep   EndpointProvider
+	hc   *http.Client
+	home string // KIMI_CODE_HOME，用于 direct-storage 删除
 }
 
 // New 用给定的 EndpointProvider 构造 Client。
 func New(ep EndpointProvider) *Client {
-	return &Client{ep: ep, hc: &http.Client{Timeout: 30 * time.Second}}
+	return &Client{ep: ep, hc: &http.Client{Timeout: 30 * time.Second}, home: replay.DefaultHome()}
 }
 
 // NewStatic 用固定 BaseURL + Token 构造 Client（来自配置或环境变量）。
@@ -367,13 +372,19 @@ func (c *Client) Restore(ctx context.Context, sessionID string, _ *RestoreOpts) 
 	return err
 }
 
-// Delete 删除会话。
+// Delete 直接删除会话（绕过 kimi web 的 HTTP 接口，因为 kimi 0.32.0 没有
+// 磁盘直读的删除接口）。实现：直接从本地存储删除会话目录并清理
+// session_index.jsonl 索引。
 //
-// kimi 0.32.0 没有磁盘直读的删除接口：`:delete` 返回 40001 unsupported action，
-// `DELETE /api/v1/sessions/{id}` 是 404 路由未找到。唯一的 sessionLifecycle/delete
-// 调试 RPC 要求会话已加载进 kimi web 运行时，对 relay 代启的实例不可用。
+// 这是 kimi 自身「既无删除 API、UI 也没有删除入口」限制下的受控兜底：等价于
+// 手动删除存储目录里对应会话文件。kimi web 运行时也可直接删（实测手动删文件夹
+// 未触发写锁冲突），故不做端口占用护栏；仅当 kimi web 正持有该会话并可能写回时
+// 存在轻微状态不一致风险，与普通手动删除行为一致。
 func (c *Client) Delete(ctx context.Context, sessionID string) error {
-	return fmt.Errorf("%w：删除会话（kimi 未提供磁盘直读的删除接口）", ErrUnsupported)
+	if c.home == "" {
+		return fmt.Errorf("无法确定 KIMI_CODE_HOME，无法删除会话")
+	}
+	return replay.DeleteSession(c.home, sessionID)
 }
 
 // ForkOpts 是 fork 的参数。

@@ -352,6 +352,18 @@ class SessionStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 彻底移除一个会话（来自 direct-storage 删除成功后的回执）。
+  /// 同时清掉活跃态与历史表，抽屉列表据此即时消失，无需等待重连。
+  void removeSession(String sid) {
+    final had = _history.any((m) => m.sessionId == sid);
+    _history.removeWhere((m) => m.sessionId == sid);
+    _activeSids.remove(sid);
+    if (currentSid == sid) {
+      currentSid = _activeSids.isNotEmpty ? _activeSids.last : null;
+    }
+    if (had || _activeSids.contains(sid)) notifyListeners();
+  }
+
   /// 会话显示名：优先历史标题，否则取 sid 前缀。
   String titleOf(String sid) {
     for (final m in _history) {
