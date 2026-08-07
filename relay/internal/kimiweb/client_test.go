@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -282,20 +283,56 @@ func TestRename_UsesRESTProfile(t *testing.T) {
 	}
 }
 
-// TestDelete_Unsupported 锁定 kimi 0.32.0 的能力边界：删除无磁盘直读接口
-// （:delete 回 40001、DELETE 是 404 路由未找到），本包直接返回 ErrUnsupported
-// 且不应发出任何请求。
-func TestDelete_Unsupported(t *testing.T) {
+// TestDelete_LockedWhenRunning 验证：若端口上有 kimi web 在运行（单写者写锁），
+// Delete 返回 ErrLocked 而非直接动存储文件。占用 58627 模拟运行中的 kimi web。
+func TestDelete_LockedWhenRunning(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:58627")
+	if err != nil {
+		t.Skip("58627 已被占用（可能真实 kimi web 在运行），跳过锁检查测试")
+	}
+	defer ln.Close()
+	c := staticClient("http://127.0.0.1:58627")
+	if err := c.Delete(context.Background(), "session_x"); !errors.Is(err, ErrLocked) {
+		t.Fatalf("Delete err = %v, want ErrLocked", err)
+	}
+}
+
+// TestDelete_DirectStorage 验证：端口空闲时 Delete 走 replay.DeleteSession 直接删存储，
+// 不发出任何 HTTP 请求。用独立临时 KIMI_CODE_HOME 隔离，避免触碰真实数据。
+func TestDelete_DirectStorage(t *testing.T) {
+	if kimiWebRunning() {
+		t.Skip("有 kimi web 在运行（端口被占用），跳过 direct-storage 删除测试")
+	}
+	home := t.TempDir()
+	t.Setenv("KIMI_CODE_HOME", home)
+
+	sid := "session_abc"
+	sessionDir := filepath.Join(home, "sessions", "wd_test", sid)
+	if err := os.MkdirAll(filepath.Join(sessionDir, "agents", "main"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionDir, "state.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	idx := filepath.Join(home, "session_index.jsonl")
+	if err := os.WriteFile(idx, []byte(`{"sessionId":"session_other","sessionDir":"x"}`+"\n"+
+		`{"sessionId":"`+sid+`","sessionDir":"`+sessionDir+`"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	srv := newFakeServer()
 	ts := httptest.NewServer(srv.handler())
 	defer ts.Close()
 	c := staticClient(ts.URL)
 
-	if err := c.Delete(context.Background(), "session_x"); !errors.Is(err, ErrUnsupported) {
-		t.Fatalf("Delete err = %v, want ErrUnsupported", err)
+	if err := c.Delete(context.Background(), sid); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := os.Stat(sessionDir); !os.IsNotExist(err) {
+		t.Fatalf("会话目录应已删除")
 	}
 	if req, _ := srv.snapshot(); req != nil {
-		t.Fatalf("不应发出请求，却命中了 %s", req.URL.Path)
+		t.Fatalf("删除不应发出 HTTP 请求，却命中了 %s", req.URL.Path)
 	}
 }
 

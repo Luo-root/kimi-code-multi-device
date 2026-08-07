@@ -50,17 +50,15 @@ void main() {
   });
 
   group('kKimiUnsupportedActions', () {
-    test('仅 delete 在不支持集合内，其余（含已支持的 rename）不在', () {
-      // 锁住 kimi 0.32.0 的能力边界：端侧据此在菜单禁用并提示，不发起请求。
-      // 重命名（rename）已确认可用（POST /profile），故不在集合内；
-      // 删除（delete）仍无磁盘接口，留在集合内。若未来 kimi 补上删除接口，
-      // 从集合移除该项即自动放开。
-      expect(kKimiUnsupportedActions, isNot(contains(ManageAction.rename)));
-      expect(kKimiUnsupportedActions, contains(ManageAction.delete));
-      expect(kKimiUnsupportedActions, isNot(contains(ManageAction.archive)));
-      expect(kKimiUnsupportedActions, isNot(contains(ManageAction.restore)));
-      expect(kKimiUnsupportedActions, isNot(contains(ManageAction.fork)));
-      expect(kKimiUnsupportedActions, isNot(contains(ManageAction.export)));
+    test('集合为空：所有动作当前均可用', () {
+      // 历史：早期 delete 无磁盘接口曾列入本集合、端侧禁用删除菜单。
+      // 现状（2026-08-07）：delete 已由 relay 改为 direct-storage 删除（关闭 kimi web
+      // 后直接删存储目录 + 清理索引），故本集合为空。所有动作（含 delete）端侧均放开。
+      // 未来若 kimi 某动作又不支持，加入本集合即自动禁用并提示，无需改协议。
+      expect(kKimiUnsupportedActions, isEmpty);
+      for (final a in ManageAction.values) {
+        expect(kKimiUnsupportedActions, isNot(contains(a)));
+      }
     });
   });
 

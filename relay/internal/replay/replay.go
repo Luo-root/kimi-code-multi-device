@@ -5,7 +5,9 @@ package replay
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -221,4 +223,62 @@ func readState(path string) Meta {
 		_ = json.Unmarshal(b, &m)
 	}
 	return m
+}
+
+// ErrSessionNotFound 表示会话在存储中不存在（可能已被删除）。
+var ErrSessionNotFound = errors.New("replay: 会话不存在或已被删除")
+
+// DeleteSession 直接从 kimi 本地存储删除一个会话：删除其目录，并从
+// session_index.jsonl 索引中移除对应行。
+//
+// 不走 kimi web 的 HTTP 接口——kimi 0.32.0 没有提供磁盘直读的删除接口
+// （:delete 回 40001、DELETE 是 404 路由未找到）。这是 SENTINEL 在「kimi 自身
+// 既无删除 API、UI 也没有删除入口」这一限制下的受控兜底：删除会话目录 +
+// 清理索引，等价于 kimi 在 UI 里点删除应做的事。
+//
+// 调用方必须在调用前确认没有 kimi web 实例在运行（单写者独占写锁），
+// 否则直接动存储文件会与运行中的实例冲突（50001 storage write failed / 索引损坏）。
+func DeleteSession(kimiHome, sid string) error {
+	dir, err := findSessionDir(kimiHome, sid)
+	if err != nil {
+		return fmt.Errorf("%w: %s", ErrSessionNotFound, sid)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("删除会话目录 %s: %w", dir, err)
+	}
+	if err := removeIndexEntry(kimiHome, sid); err != nil {
+		return fmt.Errorf("更新会话索引: %w", err)
+	}
+	return nil
+}
+
+// removeIndexEntry 从 session_index.jsonl 中删除 sessionId == sid 的行，其余原样保留。
+// 索引文件不存在时视为无需处理（会话可能只存在于目录兜底路径）。
+func removeIndexEntry(kimiHome, sid string) error {
+	idx := filepath.Join(kimiHome, "session_index.jsonl")
+	data, err := os.ReadFile(idx)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var out []byte
+	sc := bufio.NewScanner(bytes.NewReader(data))
+	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for sc.Scan() {
+		line := sc.Bytes()
+		var rec struct {
+			SessionID string `json:"sessionId"`
+		}
+		if json.Unmarshal(line, &rec) == nil && rec.SessionID == sid {
+			continue // 跳过待删除行
+		}
+		out = append(out, line...)
+		out = append(out, '\n')
+	}
+	if err := sc.Err(); err != nil {
+		return err
+	}
+	return os.WriteFile(idx, out, 0644)
 }

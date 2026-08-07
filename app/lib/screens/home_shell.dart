@@ -272,6 +272,10 @@ class _HomeShellState extends State<HomeShell> {
       // 故抽屉保持打开，用户可继续操作。
       final label = _manageActionLabel(m.action);
       if (m.ok) {
+        if (m.action == ManageAction.delete) {
+          // direct-storage 删除成功：立即从抽屉列表移除，避免残留已删会话。
+          _store.removeSession(m.sessionId);
+        }
         if (m.action == ManageAction.export) {
           // export 成功必须有可操作反馈：显示 zip 路径、支持复制/打开文件夹。
           final zipPath = m.data?['zipPath']?.toString();
