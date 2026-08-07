@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'manage_messages.dart';
 import 'models.dart';
 
 /// 会话数据中心：把中继下行的流式 chunk 累积成块，按 sid 维护。
@@ -42,6 +43,9 @@ class SessionStore extends ChangeNotifier {
 
   String? currentSid;
   String? lastError;
+  /// 最近一次会话管理操作回执（下行 session.managed）。供 UI 弹 toast 反馈
+  /// 成功/失败。每次收到新回执都赋新实例，UI 端用 identical 去重。
+  ManagedResult? lastManaged;
   DateTime? lastSyncedAt;
 
   /// 中继运行配置快照（relay.config 下行），设置页展示真实值。
@@ -192,6 +196,11 @@ class SessionStore extends ChangeNotifier {
         notifyListeners();
       case 'relay.error':
         lastError = payload['message']?.toString();
+        notifyListeners();
+      case kDownSessionManaged:
+        // 通道②：会话管理操作（archive/rename/fork/delete/restore/export）回执。
+        // 解析失败（缺 action/sessionId）时置 null，UI 不弹 toast。
+        lastManaged = ManagedResult.fromPayload(payload);
         notifyListeners();
     }
   }

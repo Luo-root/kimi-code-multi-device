@@ -1,11 +1,15 @@
 package kimiweb
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -148,67 +152,61 @@ func TestInvoke_AgentScope(t *testing.T) {
 	}
 }
 
-func TestArchive(t *testing.T) {
+// 以下管理动作走 REST :action（磁盘直读），不是调试 RPC。
+// 回归意图：任何人把实现改回 /api/v1/debug/session/{sid}/... 都会在这里失败——
+// 那条路对 relay 代启的 kimi web 必然 40401（会话未加载进其运行时）。
+
+func TestArchive_UsesRESTAction(t *testing.T) {
 	srv := newFakeServer()
+	srv.respData = `{"archived":true}`
 	ts := httptest.NewServer(srv.handler())
 	defer ts.Close()
 	c := staticClient(ts.URL)
+
 	if err := c.Archive(context.Background(), "session_x"); err != nil {
 		t.Fatalf("Archive: %v", err)
 	}
 	req, body := srv.snapshot()
-	if req.URL.Path != "/api/v1/debug/session/session_x/sessionLifecycle/archive" {
-		t.Fatalf("path = %q", req.URL.Path)
+	if want := "/api/v1/sessions/session_x:archive"; req.URL.Path != want {
+		t.Fatalf("path = %q, want %q", req.URL.Path, want)
 	}
-	if body != `["session_x"]` {
-		t.Fatalf("body = %q", body)
+	if req.Method != http.MethodPost {
+		t.Fatalf("method = %q, want POST", req.Method)
+	}
+	if body != "" {
+		t.Fatalf("body = %q, want empty", body)
+	}
+	if got := req.Header.Get("authorization"); got != "Bearer tok-123" {
+		t.Fatalf("authorization = %q", got)
 	}
 }
 
-func TestRestore(t *testing.T) {
+func TestRestore_UsesRESTAction(t *testing.T) {
 	srv := newFakeServer()
+	srv.respData = `{"id":"session_x","archived":false}`
 	ts := httptest.NewServer(srv.handler())
 	defer ts.Close()
 	c := staticClient(ts.URL)
 
-	if err := c.Restore(context.Background(), "session_x", nil); err != nil {
-		t.Fatalf("Restore(nil): %v", err)
-	}
-	_, body := srv.snapshot()
-	if body != `["session_x"]` {
-		t.Fatalf("body(nil opts) = %q, want [\"session_x\"]", body)
-	}
-
-	if err := c.Restore(context.Background(), "session_x", &RestoreOpts{AdditionalDirs: []string{"/tmp"}}); err != nil {
-		t.Fatalf("Restore(opts): %v", err)
-	}
-	_, body = srv.snapshot()
-	want := `["session_x",{"additionalDirs":["/tmp"]}]`
-	if body != want {
-		t.Fatalf("body(opts) = %q, want %q", body, want)
+	// opts 在 0.32.0 的 REST :restore 中无对应参数，传与不传都不应改变请求。
+	for _, opts := range []*RestoreOpts{nil, {AdditionalDirs: []string{"/tmp"}}} {
+		if err := c.Restore(context.Background(), "session_x", opts); err != nil {
+			t.Fatalf("Restore(%v): %v", opts, err)
+		}
+		req, body := srv.snapshot()
+		if want := "/api/v1/sessions/session_x:restore"; req.URL.Path != want {
+			t.Fatalf("path = %q, want %q", req.URL.Path, want)
+		}
+		if body != "" {
+			t.Fatalf("body = %q, want empty", body)
+		}
 	}
 }
 
-func TestDelete(t *testing.T) {
+func TestFork_UsesRESTActionAndReadsDataID(t *testing.T) {
 	srv := newFakeServer()
-	ts := httptest.NewServer(srv.handler())
-	defer ts.Close()
-	c := staticClient(ts.URL)
-	if err := c.Delete(context.Background(), "session_x"); err != nil {
-		t.Fatalf("Delete: %v", err)
-	}
-	req, body := srv.snapshot()
-	if req.URL.Path != "/api/v1/debug/session/session_x/sessionLifecycle/delete" {
-		t.Fatalf("path = %q", req.URL.Path)
-	}
-	if body != `["session_x"]` {
-		t.Fatalf("body = %q", body)
-	}
-}
-
-func TestFork(t *testing.T) {
-	srv := newFakeServer()
-	srv.respData = `{"sessionId":"session_new","id":"session_new"}`
+	// 实测 :fork 返回新 session 的完整对象，新 ID 在 data.id。
+	srv.respData = `{"id":"session_new","title":"Forked","archived":false}`
 	ts := httptest.NewServer(srv.handler())
 	defer ts.Close()
 	c := staticClient(ts.URL)
@@ -221,75 +219,218 @@ func TestFork(t *testing.T) {
 		t.Fatalf("newID = %q, want session_new", newID)
 	}
 	req, body := srv.snapshot()
-	if req.URL.Path != "/api/v1/debug/session/session_src/sessionLifecycle/fork" {
-		t.Fatalf("path = %q", req.URL.Path)
+	if want := "/api/v1/sessions/session_src:fork"; req.URL.Path != want {
+		t.Fatalf("path = %q, want %q", req.URL.Path, want)
 	}
-	want := `[{"sourceSessionId":"session_src","title":"Forked"}]`
-	if body != want {
+	// SourceSessionID 只进 URL，不应出现在 body 里。
+	if want := `{"title":"Forked"}`; body != want {
 		t.Fatalf("body = %q, want %q", body, want)
 	}
 }
 
-func TestRename(t *testing.T) {
+func TestFork_NoOptsSendsNoBody(t *testing.T) {
+	srv := newFakeServer()
+	srv.respData = `{"id":"session_new"}`
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	c := staticClient(ts.URL)
+
+	if _, err := c.Fork(context.Background(), ForkOpts{SourceSessionID: "session_src"}); err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
+	req, body := srv.snapshot()
+	if body != "" {
+		t.Fatalf("body = %q, want empty", body)
+	}
+	if ct := req.Header.Get("content-type"); ct != "" {
+		t.Fatalf("content-type = %q, want empty", ct)
+	}
+}
+
+// TestRename_UsesRESTProfile 锁定重命名走 POST /profile（而非不受支持的 :rename）：
+// 浏览器 UI 的「重命名」即此端点，body 为 {"title": newTitle}。
+func TestRename_UsesRESTProfile(t *testing.T) {
 	srv := newFakeServer()
 	ts := httptest.NewServer(srv.handler())
 	defer ts.Close()
 	c := staticClient(ts.URL)
+
 	if err := c.Rename(context.Background(), "session_x", "新标题"); err != nil {
 		t.Fatalf("Rename: %v", err)
 	}
 	req, body := srv.snapshot()
-	if req.URL.Path != "/api/v1/debug/session/session_x/sessionMetadata/setTitle" {
-		t.Fatalf("path = %q", req.URL.Path)
+	if req == nil {
+		t.Fatal("Rename 未发出请求")
 	}
-	if body != `["新标题"]` {
-		t.Fatalf("body = %q", body)
+	if want := "/api/v1/sessions/session_x/profile"; req.URL.Path != want {
+		t.Fatalf("path = %q, want %q", req.URL.Path, want)
+	}
+	if req.Method != http.MethodPost {
+		t.Fatalf("method = %q, want POST", req.Method)
+	}
+	if req.Header.Get("content-type") != "application/json" {
+		t.Fatalf("content-type = %q, want application/json", req.Header.Get("content-type"))
+	}
+	var got struct {
+		Title string `json:"title"`
+	}
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("decode body %q: %v", body, err)
+	}
+	if got.Title != "新标题" {
+		t.Fatalf("body title = %q, want 新标题", got.Title)
 	}
 }
 
-func TestExport(t *testing.T) {
+// TestDelete_Unsupported 锁定 kimi 0.32.0 的能力边界：删除无磁盘直读接口
+// （:delete 回 40001、DELETE 是 404 路由未找到），本包直接返回 ErrUnsupported
+// 且不应发出任何请求。
+func TestDelete_Unsupported(t *testing.T) {
 	srv := newFakeServer()
-	srv.respData = `{"zipPath":"/tmp/k.zip","sessionDir":"/home/s","entries":["a","b"]}`
 	ts := httptest.NewServer(srv.handler())
 	defer ts.Close()
 	c := staticClient(ts.URL)
 
-	res, err := c.Export(context.Background(), "session_x", ExportOpts{
-		Version:          "0.32.0",
-		IncludeGlobalLog: true,
-	})
-	if err != nil {
-		t.Fatalf("Export: %v", err)
+	if err := c.Delete(context.Background(), "session_x"); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("Delete err = %v, want ErrUnsupported", err)
 	}
-	if res.ZipPath != "/tmp/k.zip" {
-		t.Fatalf("zipPath = %q", res.ZipPath)
-	}
-	req, body := srv.snapshot()
-	if req.URL.Path != "/api/v1/debug/sessionExport/export" {
-		t.Fatalf("path = %q (core scope)", req.URL.Path)
-	}
-	// 校验 input 含 sessionId/version/includeGlobalLog，options 为空对象
-	var arr []map[string]any
-	if err := json.Unmarshal([]byte(body), &arr); err != nil {
-		t.Fatalf("body not array: %v", err)
-	}
-	if len(arr) != 2 {
-		t.Fatalf("args len = %d, want 2", len(arr))
-	}
-	input := arr[0]
-	if input["sessionId"] != "session_x" || input["version"] != "0.32.0" || input["includeGlobalLog"] != true {
-		t.Fatalf("input = %v", input)
-	}
-	opts := arr[1]
-	if len(opts) != 0 {
-		t.Fatalf("options = %v, want empty", opts)
+	if req, _ := srv.snapshot(); req != nil {
+		t.Fatalf("不应发出请求，却命中了 %s", req.URL.Path)
 	}
 }
 
-func TestExport_RequiresVersion(t *testing.T) {
-	c := staticClient("http://example.invalid")
-	if _, err := c.Export(context.Background(), "s", ExportOpts{}); err == nil {
-		t.Fatal("expected error for missing Version")
+// zipServer 回放一个 application/zip 二进制流，模拟真实的 /export。
+func zipServer(payload []byte, disposition string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/zip")
+		if disposition != "" {
+			w.Header().Set("content-disposition", disposition)
+		}
+		_, _ = w.Write(payload)
+	}))
+}
+
+func TestExport_WritesZipStreamToDisk(t *testing.T) {
+	payload := []byte("PK\x03\x04fake-zip-body")
+	ts := zipServer(payload, `attachment; filename="kimi-session-session_x.zip"`)
+	defer ts.Close()
+	c := staticClient(ts.URL)
+
+	dir := t.TempDir()
+	res, err := c.Export(context.Background(), "session_x", ExportOpts{OutputPath: dir})
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	want := filepath.Join(dir, "kimi-session-session_x.zip")
+	if res.ZipPath != want {
+		t.Fatalf("ZipPath = %q, want %q", res.ZipPath, want)
+	}
+	if res.SizeBytes != int64(len(payload)) {
+		t.Fatalf("SizeBytes = %d, want %d", res.SizeBytes, len(payload))
+	}
+	got, err := os.ReadFile(res.ZipPath)
+	if err != nil {
+		t.Fatalf("读取导出文件: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("落盘内容 = %q, want %q", got, payload)
+	}
+}
+
+func TestExport_UsesPOSTOnExportPath(t *testing.T) {
+	var gotPath, gotMethod, gotBody, gotCT string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotPath, gotMethod, gotBody, gotCT = r.URL.Path, r.Method, string(b), r.Header.Get("content-type")
+		w.Header().Set("content-type", "application/zip")
+		_, _ = w.Write([]byte("PK"))
+	}))
+	defer ts.Close()
+
+	c := staticClient(ts.URL)
+	if _, err := c.Export(context.Background(), "session_x", ExportOpts{OutputPath: t.TempDir()}); err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if want := "/api/v1/sessions/session_x/export"; gotPath != want {
+		t.Fatalf("path = %q, want %q", gotPath, want)
+	}
+	// 实测 GET 是 404，必须 POST。
+	if gotMethod != http.MethodPost {
+		t.Fatalf("method = %q, want POST", gotMethod)
+	}
+	// 探针 export_body_probe.py 验证：kimi 要求请求体是 JSON 对象（哪怕是空对象）。
+	// 发 nil 会报 code=40001 "expected object, received undefined"。
+	if gotBody != "{}" {
+		t.Fatalf("body = %q, want {}", gotBody)
+	}
+	if gotCT != "application/json" {
+		t.Fatalf("content-type = %q, want application/json", gotCT)
+	}
+}
+
+func TestExport_JSONEnvelopeIsError(t *testing.T) {
+	srv := newFakeServer()
+	srv.respCode = CodeStorageWriteFailed
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	c := staticClient(ts.URL)
+
+	_, err := c.Export(context.Background(), "session_x", ExportOpts{OutputPath: t.TempDir()})
+	if err == nil {
+		t.Fatal("期望错误，得到 nil")
+	}
+	re, ok := IsRPCError(err)
+	if !ok {
+		t.Fatalf("err %v 不是 *RPCError", err)
+	}
+	if re.Code != CodeStorageWriteFailed {
+		t.Fatalf("code = %d, want %d", re.Code, CodeStorageWriteFailed)
+	}
+}
+
+// TestExport_DispositionPathTraversal 确保服务端返回的文件名无法逃逸出目标目录。
+func TestExport_DispositionPathTraversal(t *testing.T) {
+	ts := zipServer([]byte("PK"), `attachment; filename="../../evil.zip"`)
+	defer ts.Close()
+	c := staticClient(ts.URL)
+
+	dir := t.TempDir()
+	res, err := c.Export(context.Background(), "session_x", ExportOpts{OutputPath: dir})
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if got := filepath.Dir(res.ZipPath); got != dir {
+		t.Fatalf("落盘目录 = %q, 逃逸出了 %q", got, dir)
+	}
+	if got := filepath.Base(res.ZipPath); got != "evil.zip" {
+		t.Fatalf("文件名 = %q, want evil.zip", got)
+	}
+}
+
+func TestFilenameFromDisposition(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`attachment; filename="kimi-session-s1.zip"`, "kimi-session-s1.zip"},
+		{`attachment; filename=plain.zip`, "plain.zip"},
+		{`attachment; filename="a.zip"; charset=utf-8`, "a.zip"},
+		{`attachment; filename="../../etc/passwd"`, "passwd"},
+		{`attachment`, ""},
+		{``, ""},
+	}
+	for _, tc := range cases {
+		if got := filenameFromDisposition(tc.in); got != tc.want {
+			t.Errorf("filenameFromDisposition(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestExportDestPath_DefaultsToTempDir(t *testing.T) {
+	got, err := exportDestPath("", "session_x", "")
+	if err != nil {
+		t.Fatalf("exportDestPath: %v", err)
+	}
+	want := filepath.Join(os.TempDir(), "sentinel-export", "kimi-session-session_x.zip")
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 

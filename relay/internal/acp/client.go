@@ -167,9 +167,9 @@ func (c *Client) Restart() error {
 // Initialize 完成 initialize 握手（protocolVersion 协商为 1，与 kimi 钉死值一致）。
 func (c *Client) Initialize(ctx context.Context) (acpsdk.InitializeResponse, error) {
 	return c.conn().Initialize(ctx, acpsdk.InitializeRequest{
-		ProtocolVersion:   acpsdk.ProtocolVersionNumber,
+		ProtocolVersion:    acpsdk.ProtocolVersionNumber,
 		ClientCapabilities: acpsdk.ClientCapabilities{},
-		ClientInfo:        &acpsdk.Implementation{Name: "sentinel-relay", Version: "0.1"},
+		ClientInfo:         &acpsdk.Implementation{Name: "sentinel-relay", Version: "0.1"},
 	})
 }
 

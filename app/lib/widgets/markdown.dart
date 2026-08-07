@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:hux/hux.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:markdown/markdown.dart' as md;
 import 'package:url_launcher/url_launcher.dart';
@@ -40,18 +39,16 @@ class MarkdownView extends StatelessWidget {
       copyToClipboard(context, href); // 同步路径：uri 非法直接复制
       return;
     }
-    // 失败回退：await 前捕获 messenger 并构建 snackbar，避免跨 async 使用 context。
-    final messenger = ScaffoldMessenger.of(context);
-    final fallback = HuxSnackbar(
-      message: '链接已复制',
-      variant: HuxSnackbarVariant.success,
-      duration: const Duration(milliseconds: 1400),
-    ).build(context);
+    // 失败回退：await 前捕获 root overlay，避免跨 async 使用 context。
+    final overlay = Overlay.maybeOf(context, rootOverlay: true);
     final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
     if (!ok) {
       Clipboard.setData(ClipboardData(text: href));
       HapticFeedback.selectionClick();
-      messenger.showSnackBar(fallback);
+      if (overlay != null) {
+        showAppToastOn(overlay,
+            message: '链接已复制', variant: AppToastVariant.success);
+      }
     }
   }
 }

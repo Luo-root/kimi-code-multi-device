@@ -90,11 +90,9 @@ class _ArchiveSheetState extends State<ArchiveSheet> {
   void _restore(SessionMeta m) {
     widget.archive.restore(m.sessionId);
     if (!mounted) return;
-    context.showHuxSnackbar(
-      message: '已恢复：${m.title.isEmpty ? "（无标题）" : m.title}',
-      variant: HuxSnackbarVariant.success,
-      duration: const Duration(milliseconds: 1500),
-    );
+    showAppToast(context,
+        message: '已恢复：${m.title.isEmpty ? "（无标题）" : m.title}',
+        variant: AppToastVariant.success);
   }
 
   void _copyId(SessionMeta m) => copyToClipboard(context, m.sessionId);
