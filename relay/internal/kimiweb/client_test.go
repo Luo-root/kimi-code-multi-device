@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -283,26 +281,9 @@ func TestRename_UsesRESTProfile(t *testing.T) {
 	}
 }
 
-// TestDelete_LockedWhenRunning 验证：若端口上有 kimi web 在运行（单写者写锁），
-// Delete 返回 ErrLocked 而非直接动存储文件。占用 58627 模拟运行中的 kimi web。
-func TestDelete_LockedWhenRunning(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:58627")
-	if err != nil {
-		t.Skip("58627 已被占用（可能真实 kimi web 在运行），跳过锁检查测试")
-	}
-	defer ln.Close()
-	c := staticClient("http://127.0.0.1:58627")
-	if err := c.Delete(context.Background(), "session_x"); !errors.Is(err, ErrLocked) {
-		t.Fatalf("Delete err = %v, want ErrLocked", err)
-	}
-}
-
-// TestDelete_DirectStorage 验证：端口空闲时 Delete 走 replay.DeleteSession 直接删存储，
+// TestDelete_DirectStorage 验证：Delete 走 replay.DeleteSession 直接删存储，
 // 不发出任何 HTTP 请求。用独立临时 KIMI_CODE_HOME 隔离，避免触碰真实数据。
 func TestDelete_DirectStorage(t *testing.T) {
-	if kimiWebRunning() {
-		t.Skip("有 kimi web 在运行（端口被占用），跳过 direct-storage 删除测试")
-	}
 	home := t.TempDir()
 	t.Setenv("KIMI_CODE_HOME", home)
 

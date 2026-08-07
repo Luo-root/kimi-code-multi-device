@@ -28,9 +28,10 @@
 //
 //	archive / restore / fork / export  -> REST :action 可用
 //	rename                             -> REST /profile 可用（浏览器 UI 的「重命名」即走此端点）
-//	delete                             -> 无磁盘直读接口（:delete 回 40001、DELETE 是 404 路由未找到），
-//	                                      故本包改走 direct-storage 删除：关闭 kimi web 后直接删存储目录 + 清理
-//	                                      session_index.jsonl 索引（与 kimi UI 无删除入口、只能手工删目录一致）。
+//	delete                             -> 无磁盘直读接口（:delete 回 40001 unsupported action、
+//	                                      DELETE /sessions/{id} 是 404 路由未找到），故本包改走 direct-storage
+//	                                      删除：直接删存储目录 + 清理 session_index.jsonl 索引。kimi web 运行时
+//	                                      亦可删（实测手动删文件夹未触发写锁冲突），不做端口占用护栏。
 //
 // # 单写者约束（重要）
 //
@@ -69,10 +70,6 @@ const sessionsBasePath = "/api/v1/sessions"
 // ErrUnsupported 表示当前 kimi 版本没有提供该管理动作的可用接口。
 // 调用方应转译为「此 kimi 版本不支持」而非当作故障重试。
 var ErrUnsupported = errors.New("kimiweb: 当前 kimi 版本不支持该操作")
-
-// ErrLocked 表示检测到 kimi web 正在运行并占用会话存储的独占写锁。
-// 此时直接动存储文件会与运行中的实例冲突，应提示用户先关闭所有 kimi web 再删除。
-var ErrLocked = errors.New("kimiweb: 检测到 kimi web 正在运行并占用会话存储写锁")
 
 // CodeStorageWriteFailed 是 kimi 存储写锁被其他实例占用时返回的错误码。
 // 语义：另一个 kimi web 正持有会话存储的独占写锁。
@@ -376,31 +373,18 @@ func (c *Client) Restore(ctx context.Context, sessionID string, _ *RestoreOpts) 
 }
 
 // Delete 直接删除会话（绕过 kimi web 的 HTTP 接口，因为 kimi 0.32.0 没有
-// 磁盘直读的删除接口）。实现：先确认端口上没有 kimi web 在运行（单写者写锁），
-// 再从本地存储删除会话目录并清理 session_index.jsonl 索引。
+// 磁盘直读的删除接口）。实现：直接从本地存储删除会话目录并清理
+// session_index.jsonl 索引。
 //
 // 这是 kimi 自身「既无删除 API、UI 也没有删除入口」限制下的受控兜底：等价于
-// 手动删除存储目录里对应会话文件。删除前必须先关闭所有 kimi web，否则会与
-// 运行中的实例冲突（50001 storage write failed / 索引损坏）。
+// 手动删除存储目录里对应会话文件。kimi web 运行时也可直接删（实测手动删文件夹
+// 未触发写锁冲突），故不做端口占用护栏；仅当 kimi web 正持有该会话并可能写回时
+// 存在轻微状态不一致风险，与普通手动删除行为一致。
 func (c *Client) Delete(ctx context.Context, sessionID string) error {
 	if c.home == "" {
 		return fmt.Errorf("无法确定 KIMI_CODE_HOME，无法删除会话")
 	}
-	if kimiWebRunning() {
-		return ErrLocked
-	}
 	return replay.DeleteSession(c.home, sessionID)
-}
-
-// kimiWebRunning 探测默认端口范围内是否有 kimi web 在监听（单写者写锁持有者）。
-// kimi 默认 58627，端口被占用时自身会顺延，故探测一段范围。
-func kimiWebRunning() bool {
-	for p := DefaultPort; p < DefaultPort+11; p++ {
-		if PortOccupied(p) {
-			return true
-		}
-	}
-	return false
 }
 
 // ForkOpts 是 fork 的参数。

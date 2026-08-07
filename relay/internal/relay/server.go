@@ -973,10 +973,6 @@ func enrichMgmtErr(err error) string {
 		// 若仍触发（例如未来协议扩展），给一条干净、不含内部前缀的中文说明。
 		return "当前 kimi 版本未提供该管理动作的接口，操作无法执行"
 	}
-	if errors.Is(err, kimiweb.ErrLocked) {
-		return "删除会话前请先关闭所有 kimi web 实例（kimi 同一时刻只允许一个进程写会话存储；" +
-			"直接删除会与运行中的实例冲突）。关闭后重试即可。(" + err.Error() + ")"
-	}
 	if errors.Is(err, replay.ErrSessionNotFound) {
 		return "该会话不存在或已被删除，请刷新会话列表后重试。"
 	}
