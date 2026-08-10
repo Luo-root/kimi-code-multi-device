@@ -18,6 +18,7 @@ enum ManageAction {
   rename('rename'),
   fork('fork'),
   delete('delete'),
+  deleteWorkspace('deleteWorkspace'),
   export('export');
 
   const ManageAction(this.value);
@@ -35,24 +36,28 @@ enum ManageAction {
 ///
 /// 现状（2026-08-07）：`delete` 已由 relay 改为 **direct-storage 删除**——关闭 kimi web
 /// 后直接删除会话存储目录并清理 `session_index.jsonl` 索引（kimi 自身 UI 也无删除入口，
-/// 只能手工删目录）。故本集合现在为空。未来若 kimi 某动作又不支持，加入对应项即可让
+/// 只能手工删目录）。`deleteWorkspace` 同理（用 workDir 维度删 `sessions/<wdID>/` 目录 +
+/// 清所有 workDir 匹配的索引行），kimi 的「移除工作区」仅是软隐藏、不动磁盘，故同样走
+/// direct-storage。故本集合现在为空。未来若 kimi 某动作又不支持，加入对应项即可让
 /// 端侧自动禁用并提示，无需改协议。
 const Set<ManageAction> kKimiUnsupportedActions = {
-  // 当前所有动作均可用：archive/restore/rename/fork/delete/export。
+  // 当前所有动作均可用：archive/restore/rename/fork/delete/deleteWorkspace/export。
 };
 
 /// 构造上行 session.manage 的 payload。
 ///
 /// - [action] 管理动作。
-/// - [sessionId] 目标会话。
+/// - [sessionId] 目标会话（deleteWorkspace 时可为空）。
 /// - [title] rename 新标题。
 /// - [newSessionId] fork 指定新会话 ID（省略则 kimi 自动生成）。
+/// - [workDir] deleteWorkspace 目标工作区路径（用于定位 sessions/&lt;wdID&gt; 目录）。
 /// - [options] 预留（export 的 version/outputPath 等）。
 Map<String, dynamic> buildManageRequest(
   ManageAction action,
   String sessionId, {
   String? title,
   String? newSessionId,
+  String? workDir,
   Map<String, dynamic>? options,
 }) {
   final p = <String, dynamic>{
@@ -61,6 +66,7 @@ Map<String, dynamic> buildManageRequest(
   };
   if (title != null) p['title'] = title;
   if (newSessionId != null) p['newSessionId'] = newSessionId;
+  if (workDir != null) p['workDir'] = workDir;
   if (options != null) p['options'] = options;
   return p;
 }
@@ -69,6 +75,7 @@ Map<String, dynamic> buildManageRequest(
 class ManagedResult {
   final ManageAction action;
   final String sessionId;
+  final String? workDir; // deleteWorkspace 回显的工作区路径
   final bool ok;
   final String? error;
   final Map<String, dynamic>? data;
@@ -76,6 +83,7 @@ class ManagedResult {
   const ManagedResult({
     required this.action,
     required this.sessionId,
+    this.workDir,
     required this.ok,
     this.error,
     this.data,
@@ -90,6 +98,7 @@ class ManagedResult {
     return ManagedResult(
       action: ManageAction.fromValue(actionRaw),
       sessionId: sid,
+      workDir: payload['workDir']?.toString(),
       ok: ok,
       error: payload['error']?.toString(),
       data: (payload['data'] as Map?)?.cast<String, dynamic>(),

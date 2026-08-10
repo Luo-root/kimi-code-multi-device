@@ -169,6 +169,7 @@ type managementClient interface {
 	Archive(ctx context.Context, sessionID string) error
 	Restore(ctx context.Context, sessionID string, opts *kimiweb.RestoreOpts) error
 	Delete(ctx context.Context, sessionID string) error
+	DeleteWorkspace(ctx context.Context, workDir string) error
 	Fork(ctx context.Context, opts kimiweb.ForkOpts) (string, error)
 	Rename(ctx context.Context, sessionID, title string) error
 	Export(ctx context.Context, sessionID string, opts kimiweb.ExportOpts) (*kimiweb.ExportResult, error)
@@ -863,13 +864,17 @@ func (r *Relay) handleManageSession(c *client, p UpManageSessionPayload) {
 			Type:      DownSessionManaged,
 			SessionID: sid,
 			Payload: mustJSON(DownSessionManagedPayload{
-				Action: p.Action, SessionID: sid, Ok: ok, Error: errMsg, Data: data,
+				Action: p.Action, SessionID: sid, WorkDir: p.WorkDir, Ok: ok, Error: errMsg, Data: data,
 			}),
 		})
 	}
 
-	if sid == "" {
+	if sid == "" && p.Action != ManageActionDeleteWorkspace {
 		reply(false, "session.manage 缺少 sessionId", nil)
+		return
+	}
+	if p.Action == ManageActionDeleteWorkspace && p.WorkDir == "" {
+		reply(false, "session.manage deleteWorkspace 缺少 workDir", nil)
 		return
 	}
 	mgmt, err := r.management()
@@ -893,6 +898,11 @@ func (r *Relay) handleManageSession(c *client, p UpManageSessionPayload) {
 		}
 	case ManageActionDelete:
 		if err := mgmt.Delete(ctx, sid); err != nil {
+			reply(false, enrichMgmtErr(err), nil)
+			return
+		}
+	case ManageActionDeleteWorkspace:
+		if err := mgmt.DeleteWorkspace(ctx, p.WorkDir); err != nil {
 			reply(false, enrichMgmtErr(err), nil)
 			return
 		}
@@ -975,6 +985,9 @@ func enrichMgmtErr(err error) string {
 	}
 	if errors.Is(err, replay.ErrSessionNotFound) {
 		return "该会话不存在或已被删除，请刷新会话列表后重试。"
+	}
+	if errors.Is(err, replay.ErrWorkspaceNotFound) {
+		return "该工作区不存在或已被删除，请刷新会话列表后重试。"
 	}
 	if re, ok := kimiweb.IsRPCError(err); ok {
 		switch re.Code {

@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Block 是回放的一个内容块。
@@ -250,6 +251,114 @@ func DeleteSession(kimiHome, sid string) error {
 		return fmt.Errorf("更新会话索引: %w", err)
 	}
 	return nil
+}
+
+// ErrWorkspaceNotFound 表示工作区在存储中不存在（可能已被删除）。
+var ErrWorkspaceNotFound = errors.New("replay: 工作区不存在或已被删除")
+
+// DeleteWorkspace 直接从 kimi 本地存储删除一个工作区：删除其 sessions/<wdID> 目录，
+// 并从 session_index.jsonl 中移除所有 workDir 匹配的行。
+//
+// 不走 kimi web 的 HTTP 接口——kimi 的「移除工作区」只是软隐藏（从注册表移除、
+// 不动磁盘；已实测 DELETE /workspaces/{id} 返回 deleted=true 但磁盘目录与索引行
+// 原封不动），真正的删除必须由 relay 直接动存储（删目录 + 清索引），等价于在
+// 文件管理器里删掉 sessions/<wdID>/ 目录并清理索引。这与会话删除（DeleteSession）
+// 是同一套 direct-storage 机制，仅在匹配维度上从 sessionId 换成 workDir。
+//
+// 调用方必须在调用前确认没有 kimi web 实例在运行（单写者独占写锁），否则直接动
+// 存储文件会与运行中的实例冲突（50001 storage write failed / 索引损坏）。
+func DeleteWorkspace(kimiHome, workDir string) error {
+	idx := filepath.Join(kimiHome, "session_index.jsonl")
+	lines, err := readIndexLines(idx)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	target := filepath.Clean(workDir)
+	// 用 workDir 定位该工作区在磁盘上的 sessions/<wdID>/ 目录：取任一会话的
+	// sessionDir 父目录即可（sessionDir = <home>/sessions/<wdID>/session_<uuid>）。
+	var wsDir string
+	for _, line := range lines {
+		var rec struct {
+			SessionDir string `json:"sessionDir"`
+			WorkDir    string `json:"workDir"`
+		}
+		if json.Unmarshal([]byte(line), &rec) == nil &&
+			rec.WorkDir != "" && strings.EqualFold(filepath.Clean(rec.WorkDir), target) {
+			if rec.SessionDir != "" {
+				if d := filepath.Dir(filepath.Clean(rec.SessionDir)); d != "" {
+					wsDir = d
+					break
+				}
+			}
+		}
+	}
+	if wsDir == "" {
+		return fmt.Errorf("%w: %s", ErrWorkspaceNotFound, workDir)
+	}
+	if err := os.RemoveAll(wsDir); err != nil {
+		return fmt.Errorf("删除工作区目录 %s: %w", wsDir, err)
+	}
+	if err := removeWorkspaceIndexEntries(kimiHome, target); err != nil {
+		return fmt.Errorf("更新会话索引: %w", err)
+	}
+	return nil
+}
+
+// readIndexLines 读取 session_index.jsonl 的全部非空行（每行一个 JSON 对象）。
+func readIndexLines(idx string) ([]string, error) {
+	data, err := os.ReadFile(idx)
+	if err != nil {
+		return nil, err
+	}
+	var lines []string
+	sc := bufio.NewScanner(bytes.NewReader(data))
+	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for sc.Scan() {
+		if line := strings.TrimSpace(sc.Text()); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	return lines, nil
+}
+
+// removeWorkspaceIndexEntries 从 session_index.jsonl 中删除 workDir 匹配的行，其余原样保留。
+// 索引文件不存在时视为无需处理。
+func removeWorkspaceIndexEntries(kimiHome, workDir string) error {
+	idx := filepath.Join(kimiHome, "session_index.jsonl")
+	data, err := os.ReadFile(idx)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	target := filepath.Clean(workDir)
+	var out []byte
+	sc := bufio.NewScanner(bytes.NewReader(data))
+	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for sc.Scan() {
+		line := sc.Bytes()
+		var rec struct {
+			WorkDir string `json:"workDir"`
+		}
+		skip := false
+		if json.Unmarshal(line, &rec) == nil && rec.WorkDir != "" &&
+			strings.EqualFold(filepath.Clean(rec.WorkDir), target) {
+			skip = true
+		}
+		if skip {
+			continue
+		}
+		out = append(out, line...)
+		out = append(out, '\n')
+	}
+	if err := sc.Err(); err != nil {
+		return err
+	}
+	return os.WriteFile(idx, out, 0644)
 }
 
 // removeIndexEntry 从 session_index.jsonl 中删除 sessionId == sid 的行，其余原样保留。

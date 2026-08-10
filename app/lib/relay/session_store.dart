@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'manage_messages.dart';
 import 'models.dart';
+import 'session_view.dart';
 
 /// 会话数据中心：把中继下行的流式 chunk 累积成块，按 sid 维护。
 /// 这是 Phase 2 的核心——Kimi 的增量 update 在这里拼成可渲染的流。
@@ -362,6 +363,29 @@ class SessionStore extends ChangeNotifier {
       currentSid = _activeSids.isNotEmpty ? _activeSids.last : null;
     }
     if (had || _activeSids.contains(sid)) notifyListeners();
+  }
+
+  /// 删除工作区下全部会话（端侧抽屉即时刷新）。
+  /// [workDir] 为工作区完整路径，按与抽屉分组一致的 sessionGroupKey 匹配。
+  /// 返回被移除的会话数。
+  int removeWorkspaceSessions(String workDir) {
+    final key = sessionGroupKey(workDir);
+    final before = _history.length;
+    final removed = <String>[];
+    _history.removeWhere((m) {
+      final hit = sessionGroupKey(m.cwd) == key;
+      if (hit) removed.add(m.sessionId);
+      return hit;
+    });
+    for (final sid in removed) {
+      _activeSids.remove(sid);
+      if (currentSid == sid) {
+        currentSid = _activeSids.isNotEmpty ? _activeSids.last : null;
+      }
+    }
+    final n = before - _history.length;
+    if (n > 0) notifyListeners();
+    return n;
   }
 
   /// 会话显示名：优先历史标题，否则取 sid 前缀。

@@ -35,7 +35,7 @@ void main() {
   group('ManageAction', () {
     test('枚举取值与 relay ManageAction* 常量一致', () {
       expect(ManageAction.values.map((e) => e.value).toList(),
-          ['archive', 'restore', 'rename', 'fork', 'delete', 'export']);
+          ['archive', 'restore', 'rename', 'fork', 'delete', 'deleteWorkspace', 'export']);
     });
 
     test('fromValue 往返', () {

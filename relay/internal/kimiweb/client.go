@@ -387,6 +387,19 @@ func (c *Client) Delete(ctx context.Context, sessionID string) error {
 	return replay.DeleteSession(c.home, sessionID)
 }
 
+// DeleteWorkspace 直接删除一个工作区（绕过 kimi web 的 HTTP 接口）。
+// kimi 的「移除工作区」仅是软隐藏（注册表移除、不动磁盘，已实测
+// DELETE /workspaces/{id} 返回 deleted=true 但索引行与磁盘目录原封不动），
+// 真正的删除由 relay 直接动存储目录 + 清理索引（与 Delete 同一套 direct-storage
+// 机制，匹配维度从 sessionId 换成 workDir）。kimi web 运行时也可删
+// （已实测直接删目录不冲突），不再做端口占用护栏。
+func (c *Client) DeleteWorkspace(ctx context.Context, workDir string) error {
+	if c.home == "" {
+		return fmt.Errorf("无法确定 KIMI_CODE_HOME，无法删除工作区")
+	}
+	return replay.DeleteWorkspace(c.home, workDir)
+}
+
 // ForkOpts 是 fork 的参数。
 type ForkOpts struct {
 	SourceSessionID string         `json:"-"`

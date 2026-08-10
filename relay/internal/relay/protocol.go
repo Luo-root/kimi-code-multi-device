@@ -37,6 +37,9 @@ const (
 	ManageActionFork    = "fork"
 	ManageActionDelete  = "delete"
 	ManageActionExport  = "export"
+	// deleteWorkspace 复用同一上行消息，用 workDir 维度删除整个工作区
+	// （删 sessions/<wdID>/ 目录 + 清索引行），与 DeleteSession 同理。
+	ManageActionDeleteWorkspace = "deleteWorkspace"
 )
 
 // 上行 type
@@ -130,6 +133,7 @@ type UpManageSessionPayload struct {
 	SessionID    string          `json:"sessionId"`
 	Title        string          `json:"title,omitempty"`        // rename 新标题
 	NewSessionID string          `json:"newSessionId,omitempty"` // fork 指定新会话 ID（省略则 kimi 自动生成）
+	WorkDir      string          `json:"workDir,omitempty"`      // deleteWorkspace：目标工作区路径
 	Options      json.RawMessage `json:"options,omitempty"`      // 预留（export 版本/输出路径等）
 }
 
@@ -138,6 +142,7 @@ type UpManageSessionPayload struct {
 type DownSessionManagedPayload struct {
 	Action    string          `json:"action"`
 	SessionID string          `json:"sessionId"`
+	WorkDir   string          `json:"workDir,omitempty"` // deleteWorkspace：回显工作区路径，供端侧定位要移除的工作区
 	Ok        bool            `json:"ok"`
 	Error     string          `json:"error,omitempty"`
 	Data      json.RawMessage `json:"data,omitempty"`
