@@ -299,6 +299,18 @@ func (r *Relay) refreshHistory(ctx context.Context) error {
 		}
 		metas = append(metas, m)
 	}
+	// 兜底：ACP 在某些版本/状态下会返回空列表（如 kimi 0.32.0 运行时未加载磁盘会话），
+	// 但存储里实际有数据。此时直接从 session_index.jsonl + state.json 读取，保证抽屉
+	// 与磁盘一致。
+	if len(metas) == 0 && r.kimiHome != "" {
+		fromDisk, diskErr := replay.ListSessionsFromDisk(r.kimiHome)
+		if diskErr == nil && len(fromDisk) > 0 {
+			log.Printf("[relay] ACP ListSessions 返回空，从磁盘读取到 %d 条会话", len(fromDisk))
+			metas = fromDisk
+		} else if diskErr != nil {
+			log.Printf("[relay] 从磁盘读取会话列表失败: %v", diskErr)
+		}
+	}
 	r.store.SetHistory(metas)
 	return nil
 }

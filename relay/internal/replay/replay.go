@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Luo-root/kimi-code-multi-device/relay/internal/session"
 )
 
 // Block 是回放的一个内容块。
@@ -224,6 +226,54 @@ func readState(path string) Meta {
 		_ = json.Unmarshal(b, &m)
 	}
 	return m
+}
+
+// ListSessionsFromDisk 从 kimi 本地存储的 session_index.jsonl + state.json 读取会话列表。
+//
+// 这是 ACP `ListSessions` 的兜底/替代方案：kimi 0.32.0 的 ACP 运行时在某些场景下
+// 不返回磁盘已有会话（如进程未加载、索引未同步），导致端侧抽屉为空。直接从磁盘读
+// 索引能确保列表与存储一致。
+func ListSessionsFromDisk(kimiHome string) ([]session.SessionMeta, error) {
+	idx := filepath.Join(kimiHome, "session_index.jsonl")
+	f, err := os.Open(idx)
+	if err != nil {
+		return nil, fmt.Errorf("replay: 打开索引: %w", err)
+	}
+	defer f.Close()
+
+	var metas []session.SessionMeta
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for sc.Scan() {
+		var rec struct {
+			SessionID  string `json:"sessionId"`
+			SessionDir string `json:"sessionDir"`
+		}
+		if json.Unmarshal(sc.Bytes(), &rec) != nil || rec.SessionID == "" {
+			continue
+		}
+		m := session.SessionMeta{SessionID: rec.SessionID}
+		state := readState(filepath.Join(rec.SessionDir, "state.json"))
+		if state.Title != "" {
+			m.Title = state.Title
+		}
+		if state.WorkDir != "" {
+			m.CWD = state.WorkDir
+		} else if rec.SessionDir != "" {
+			// 兜底：从 sessionDir 反推 workDir（旧索引可能没写 workDir）。
+			m.CWD = rec.SessionDir
+		}
+		if state.UpdatedAt != "" {
+			m.UpdatedAt = state.UpdatedAt
+		} else if state.CreatedAt != "" {
+			m.UpdatedAt = state.CreatedAt
+		}
+		metas = append(metas, m)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("replay: 扫描索引: %w", err)
+	}
+	return metas, nil
 }
 
 // ErrSessionNotFound 表示会话在存储中不存在（可能已被删除）。
