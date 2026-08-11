@@ -165,9 +165,19 @@ class _HomeShellState extends State<HomeShell> {
     _client.onReconnecting = () => _store.markDisconnected(reconnecting: true);
     _store.addListener(_onStore);
     _scrollCtrl.addListener(_onScroll);
-    // 异步加载归档集合；失败不阻塞首屏。
-    _archive.load();
+    // 异步加载归档集合；失败不阻塞首屏。加载完成后基于当前会话列表清理幽灵归档。
+    _archive.load().then((_) {
+      if (mounted) _pruneGhostArchives();
+    });
     _connect(_relayUrl);
+  }
+
+  /// 会话列表刷新 / 归档集合加载后，清理"已归档标记但会话已不存在"的幽灵 sid。
+  /// 仅在列表非空时执行，避免 relay 未连接（history 为空）时误清本地归档。
+  void _pruneGhostArchives() {
+    final history = _store.history;
+    if (history.isEmpty) return;
+    _archive.prune({for (final m in history) m.sessionId});
   }
 
   void _onScroll() {
@@ -304,6 +314,8 @@ class _HomeShellState extends State<HomeShell> {
       }
     }
     setState(() {});
+    // 会话列表 / 管理回执变化后，清理幽灵归档 sid（仅当列表非空，避免误清）。
+    _pruneGhostArchives();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _measureDock();
       // 仅当用户停在底部（或刚发消息，见 _send 置 _atBottom=true）才自动跟随，
@@ -1740,7 +1752,11 @@ class _SessionDrawerState extends State<_SessionDrawer> {
       initialExpanded: _expanded,
     );
     final cur = widget.store.currentSid;
-    final archiveCount = widget.archive.ids.length;
+    // 计数与归档弹窗同源：只统计"当前会话列表中确实被归档"的数量，
+    // 避免本地归档集合里的幽灵 sid（会话已删除）让计数虚高、与弹窗内容不一致。
+    final archiveCount = widget.store.history
+        .where((m) => widget.archive.isArchived(m.sessionId))
+        .length;
 
     return SafeArea(
       child: Column(

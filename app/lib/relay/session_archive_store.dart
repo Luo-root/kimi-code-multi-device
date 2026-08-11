@@ -49,6 +49,19 @@ class SessionArchiveStore extends ChangeNotifier {
     return added;
   }
 
+  /// 移除 [keep] 中不存在的归档 sid（幽灵归档：会话已删除 / 不再可见）。
+  /// 仅在 [keep] 非空时执行，避免 relay 未就绪（history 为空）时误清本地归档。
+  /// 返回实际移除的数量。
+  int prune(Set<String> keep) {
+    if (keep.isEmpty) return 0;
+    final removed = _ids.where((id) => !keep.contains(id)).toList();
+    if (removed.isEmpty) return 0;
+    _ids.removeAll(removed);
+    _persist();
+    notifyListeners();
+    return removed.length;
+  }
+
   /// 启动时一次性读取本地归档集合。
   Future<void> load() async {
     try {
