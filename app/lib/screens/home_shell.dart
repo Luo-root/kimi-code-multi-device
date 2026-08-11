@@ -165,9 +165,19 @@ class _HomeShellState extends State<HomeShell> {
     _client.onReconnecting = () => _store.markDisconnected(reconnecting: true);
     _store.addListener(_onStore);
     _scrollCtrl.addListener(_onScroll);
-    // 异步加载归档集合；失败不阻塞首屏。
-    _archive.load();
+    // 异步加载归档集合；失败不阻塞首屏。加载完成后基于当前会话列表清理幽灵归档。
+    _archive.load().then((_) {
+      if (mounted) _pruneGhostArchives();
+    });
     _connect(_relayUrl);
+  }
+
+  /// 会话列表刷新 / 归档集合加载后，清理"已归档标记但会话已不存在"的幽灵 sid。
+  /// 仅在列表非空时执行，避免 relay 未连接（history 为空）时误清本地归档。
+  void _pruneGhostArchives() {
+    final history = _store.history;
+    if (history.isEmpty) return;
+    _archive.prune({for (final m in history) m.sessionId});
   }
 
   void _onScroll() {
@@ -272,6 +282,18 @@ class _HomeShellState extends State<HomeShell> {
       // 故抽屉保持打开，用户可继续操作。
       final label = _manageActionLabel(m.action);
       if (m.ok) {
+        if (m.action == ManageAction.delete) {
+          // direct-storage 删除成功：立即从抽屉列表移除，避免残留已删会话。
+          _store.removeSession(m.sessionId);
+        }
+        if (m.action == ManageAction.deleteWorkspace) {
+          // direct-storage 工作区删除成功：立即从抽屉移除该工作区下全部会话。
+          if (m.workDir != null && m.workDir!.isNotEmpty) {
+            final n = _store.removeWorkspaceSessions(m.workDir!);
+            _showSimpleManageOk(
+                m, '已删除工作区（${n > 0 ? '$n 个会话' : '无会话'}）');
+          }
+        }
         if (m.action == ManageAction.export) {
           // export 成功必须有可操作反馈：显示 zip 路径、支持复制/打开文件夹。
           final zipPath = m.data?['zipPath']?.toString();
@@ -292,6 +314,8 @@ class _HomeShellState extends State<HomeShell> {
       }
     }
     setState(() {});
+    // 会话列表 / 管理回执变化后，清理幽灵归档 sid（仅当列表非空，避免误清）。
+    _pruneGhostArchives();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _measureDock();
       // 仅当用户停在底部（或刚发消息，见 _send 置 _atBottom=true）才自动跟随，
@@ -463,6 +487,7 @@ class _HomeShellState extends State<HomeShell> {
         ManageAction.rename => '重命名',
         ManageAction.fork => '分叉',
         ManageAction.delete => '删除',
+        ManageAction.deleteWorkspace => '删除工作区',
         ManageAction.export => '导出',
       };
 
@@ -1727,7 +1752,11 @@ class _SessionDrawerState extends State<_SessionDrawer> {
       initialExpanded: _expanded,
     );
     final cur = widget.store.currentSid;
-    final archiveCount = widget.archive.ids.length;
+    // 计数与归档弹窗同源：只统计"当前会话列表中确实被归档"的数量，
+    // 避免本地归档集合里的幽灵 sid（会话已删除）让计数虚高、与弹窗内容不一致。
+    final archiveCount = widget.store.history
+        .where((m) => widget.archive.isArchived(m.sessionId))
+        .length;
 
     return SafeArea(
       child: Column(
@@ -1912,7 +1941,7 @@ class _SessionDrawerState extends State<_SessionDrawer> {
               ),
             ),
           ),
-          _GroupMenu(workspaceKey: key, sessionIds: sids),
+          _GroupMenu(workspaceKey: key, sessionIds: sids, client: widget.client),
         ],
       ),
     );
@@ -2232,7 +2261,11 @@ class _SessionMenuItem extends StatelessWidget {
 class _GroupMenu extends StatelessWidget {
   final String workspaceKey; // sessionGroupKey（路径末两级）
   final List<String> sessionIds; // 该工作区当前可见（未归档）会话的 sid
-  const _GroupMenu({required this.workspaceKey, required this.sessionIds});
+  final RelayClient client; // 发起 workspace.manage
+  const _GroupMenu(
+      {required this.workspaceKey,
+      required this.sessionIds,
+      required this.client});
 
   @override
   Widget build(BuildContext context) {
@@ -2255,9 +2288,16 @@ class _GroupMenu extends StatelessWidget {
           height: 36,
           child: _SessionMenuItem(icon: AppIcons.archive, label: '归档工作区'),
         ),
-        // 「重命名 / 移除工作区」故意不展示：工作区是端侧按 cwd 末两级聚合出来的
-        // 视图概念，kimi 侧只有「会话」实体，通道② 也无对应 RPC。若要支持，需要
-        // 端侧自建工作区元数据存储，属独立特性而非本通道的缺口。
+        const PopupMenuItem(
+          value: _GroupMenuAction.deleteWorkspace,
+          height: 36,
+          child: _SessionMenuItem(
+              icon: AppIcons.remove, label: '删除工作区', danger: true),
+        ),
+        // 「重命名工作区」故意不展示：工作区是端侧按 cwd 末两级聚合出来的视图概念，
+        // kimi 侧只有「会话」实体，通道② 也无对应 RPC。删除工作区则已落地——
+        // 走 direct-storage（删 sessions/<wdID>/ 目录 + 清索引行），kimi 的
+        // 「移除工作区」仅是软隐藏不动磁盘，故 SENTINEL 直接动存储。
       ],
       onSelected: (a) => _onSelected(context, a),
       child: SizedBox(
@@ -2293,12 +2333,52 @@ class _GroupMenu extends StatelessWidget {
                 n > 0 ? AppToastVariant.success : AppToastVariant.info,
           );
         }
+      case _GroupMenuAction.deleteWorkspace:
+        final store = SessionStoreScope.of(rootCtx);
+        final fullCwd = _resolveFullCwd(store);
+        if (fullCwd == null) {
+          if (rootCtx.mounted) {
+            showAppToast(rootCtx, message: '找不到该工作区的完整路径，无法删除');
+          }
+          return;
+        }
+        _confirmDeleteWorkspace(rootCtx, fullCwd);
       case _GroupMenuAction.rename:
-      case _GroupMenuAction.remove:
         if (rootCtx.mounted) {
           showAppToast(rootCtx, message: '${_labelOf(a)}即将支持');
         }
     }
+  }
+
+  void _confirmDeleteWorkspace(BuildContext ctx, String workDir) {
+    showHuxDialog<bool>(
+      context: ctx,
+      title: '删除工作区',
+      content: Text(
+        '确定删除工作区「$workspaceKey」及其全部会话？\n'
+        '该操作会移除本地工作区目录与会话索引，且无法撤销。',
+        style: AppText.body,
+      ),
+      actions: [
+        HuxButton(
+          onPressed: () => Navigator.of(ctx).pop(false),
+          variant: HuxButtonVariant.secondary,
+          child: Text('取消', style: AppText.calloutStrong),
+        ),
+        HuxButton(
+          onPressed: () => Navigator.of(ctx).pop(true),
+          // hux 无 danger 变体，用 primaryColor 承载危险语义。
+          primaryColor: AppColors.reject,
+          child: Text('删除', style: AppText.calloutStrong),
+        ),
+      ],
+    ).then((ok) {
+      if (ok == true && ctx.mounted) {
+        client.send(kUpManageSession,
+            payload:
+                buildManageRequest(ManageAction.deleteWorkspace, '', workDir: workDir));
+      }
+    });
   }
 
   /// 在 store.history 里反查工作区的完整 cwd。找不到时返回 null。
@@ -2312,12 +2392,12 @@ class _GroupMenu extends StatelessWidget {
   String _labelOf(_GroupMenuAction a) => switch (a) {
         _GroupMenuAction.copyPath => '复制工作区路径',
         _GroupMenuAction.archiveWorkspace => '归档工作区',
+        _GroupMenuAction.deleteWorkspace => '删除工作区',
         _GroupMenuAction.rename => '重命名工作区',
-        _GroupMenuAction.remove => '移除工作区',
       };
 }
 
-enum _GroupMenuAction { copyPath, archiveWorkspace, rename, remove }
+enum _GroupMenuAction { copyPath, archiveWorkspace, deleteWorkspace, rename }
 
 /// 让 _SessionRowMenu（无 BuildContext 上下文）能拿到全局 SessionStore / Archive。
 /// 抽屉由 _HomeShellState 直接 build，所以这两个对象就近放在 InheritedWidget。

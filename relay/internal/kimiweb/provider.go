@@ -104,7 +104,7 @@ func (p *SpawnProvider) Endpoint(ctx context.Context) (Endpoint, error) {
 	p.mu.Unlock()
 
 	// 1) 端口上已有服务：必须复用，绝不能再起第二个（单写者写锁）。
-	if occupied := portOccupied(p.port()); occupied {
+	if occupied := PortOccupied(p.port()); occupied {
 		ep, err := p.reuseExisting(ctx)
 		if err != nil {
 			p.mu.Lock()
@@ -155,8 +155,9 @@ func (p *SpawnProvider) reuseExisting(ctx context.Context) (Endpoint, error) {
 	return Endpoint{BaseURL: base, Token: p.Token}, nil
 }
 
-// portOccupied 检测本机端口上是否已有服务在监听。
-func portOccupied(port int) bool {
+// PortOccupied 检测本机端口上是否已有服务在监听（loopback）。
+// 用于单写者约束判断：kimi web 占用端口即代表持有会话存储的独占写锁。
+func PortOccupied(port int) bool {
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), probeTimeout)
 	if err != nil {
 		return false

@@ -102,3 +102,56 @@ func writeWireFixture(t *testing.T, items []map[string]interface{}) string {
 	}
 	return path
 }
+
+func TestListSessionsFromDisk(t *testing.T) {
+	home := t.TempDir()
+	sessionsDir := filepath.Join(home, "sessions", "wd_test_abc123")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	sid := "session_11111111-1111-1111-1111-111111111111"
+	sDir := filepath.Join(sessionsDir, sid)
+	if err := os.MkdirAll(sDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := map[string]interface{}{
+		"title":     "disk session",
+		"createdAt": "2026-08-10T17:27:38.722Z",
+		"updatedAt": "2026-08-10T17:29:47.810Z",
+		"workDir":   "D:/project/relay",
+	}
+	if err := os.WriteFile(filepath.Join(sDir, "state.json"), mustJSON(t, state), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	idxRec := map[string]interface{}{
+		"sessionId":  sid,
+		"sessionDir": sDir,
+		"workDir":    "D:/project/relay",
+	}
+	if err := os.WriteFile(filepath.Join(home, "session_index.jsonl"), mustJSON(t, idxRec), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	metas, err := ListSessionsFromDisk(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metas) != 1 {
+		t.Fatalf("got %d metas, want 1", len(metas))
+	}
+	m := metas[0]
+	if m.SessionID != sid || m.Title != "disk session" || m.CWD != "D:/project/relay" || m.UpdatedAt != "2026-08-10T17:29:47.810Z" {
+		t.Fatalf("unexpected meta: %+v", m)
+	}
+}
+
+func mustJSON(t *testing.T, v interface{}) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(b, '\n')
+}

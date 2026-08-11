@@ -169,6 +169,7 @@ type managementClient interface {
 	Archive(ctx context.Context, sessionID string) error
 	Restore(ctx context.Context, sessionID string, opts *kimiweb.RestoreOpts) error
 	Delete(ctx context.Context, sessionID string) error
+	DeleteWorkspace(ctx context.Context, workDir string) error
 	Fork(ctx context.Context, opts kimiweb.ForkOpts) (string, error)
 	Rename(ctx context.Context, sessionID, title string) error
 	Export(ctx context.Context, sessionID string, opts kimiweb.ExportOpts) (*kimiweb.ExportResult, error)
@@ -297,6 +298,18 @@ func (r *Relay) refreshHistory(ctx context.Context) error {
 			m.UpdatedAt = *s.UpdatedAt
 		}
 		metas = append(metas, m)
+	}
+	// 兜底：ACP 在某些版本/状态下会返回空列表（如 kimi 0.32.0 运行时未加载磁盘会话），
+	// 但存储里实际有数据。此时直接从 session_index.jsonl + state.json 读取，保证抽屉
+	// 与磁盘一致。
+	if len(metas) == 0 && r.kimiHome != "" {
+		fromDisk, diskErr := replay.ListSessionsFromDisk(r.kimiHome)
+		if diskErr == nil && len(fromDisk) > 0 {
+			log.Printf("[relay] ACP ListSessions 返回空，从磁盘读取到 %d 条会话", len(fromDisk))
+			metas = fromDisk
+		} else if diskErr != nil {
+			log.Printf("[relay] 从磁盘读取会话列表失败: %v", diskErr)
+		}
 	}
 	r.store.SetHistory(metas)
 	return nil
@@ -863,13 +876,17 @@ func (r *Relay) handleManageSession(c *client, p UpManageSessionPayload) {
 			Type:      DownSessionManaged,
 			SessionID: sid,
 			Payload: mustJSON(DownSessionManagedPayload{
-				Action: p.Action, SessionID: sid, Ok: ok, Error: errMsg, Data: data,
+				Action: p.Action, SessionID: sid, WorkDir: p.WorkDir, Ok: ok, Error: errMsg, Data: data,
 			}),
 		})
 	}
 
-	if sid == "" {
+	if sid == "" && p.Action != ManageActionDeleteWorkspace {
 		reply(false, "session.manage 缺少 sessionId", nil)
+		return
+	}
+	if p.Action == ManageActionDeleteWorkspace && p.WorkDir == "" {
+		reply(false, "session.manage deleteWorkspace 缺少 workDir", nil)
 		return
 	}
 	mgmt, err := r.management()
@@ -893,6 +910,11 @@ func (r *Relay) handleManageSession(c *client, p UpManageSessionPayload) {
 		}
 	case ManageActionDelete:
 		if err := mgmt.Delete(ctx, sid); err != nil {
+			reply(false, enrichMgmtErr(err), nil)
+			return
+		}
+	case ManageActionDeleteWorkspace:
+		if err := mgmt.DeleteWorkspace(ctx, p.WorkDir); err != nil {
 			reply(false, enrichMgmtErr(err), nil)
 			return
 		}
@@ -965,12 +987,19 @@ func (r *Relay) kimiVersionLocked() string {
 //     典型场景是用户自己开着 kimi web，relay 又起了第二个实例。
 //   - 40401 session not found：会话未加载进 kimi web 运行时（仅调试 RPC 路径会遇到；
 //     REST :action 走磁盘直读，正常不会命中）。
-//   - ErrUnsupported：kimi 该版本压根没提供此动作的接口（rename/delete）。
+//   - ErrUnsupported：kimi 该版本压根没提供此动作的接口（当前 rename/delete 均已
+//     有实现路径，此分支作为未来接口回退时的兜底，一般不再触发）。
 func enrichMgmtErr(err error) string {
 	if errors.Is(err, kimiweb.ErrUnsupported) {
 		// 端侧已按 kKimiUnsupportedActions 在菜单禁用并提示，理论上不会走到这里；
 		// 若仍触发（例如未来协议扩展），给一条干净、不含内部前缀的中文说明。
 		return "当前 kimi 版本未提供该管理动作的接口，操作无法执行"
+	}
+	if errors.Is(err, replay.ErrSessionNotFound) {
+		return "该会话不存在或已被删除，请刷新会话列表后重试。"
+	}
+	if errors.Is(err, replay.ErrWorkspaceNotFound) {
+		return "该工作区不存在或已被删除，请刷新会话列表后重试。"
 	}
 	if re, ok := kimiweb.IsRPCError(err); ok {
 		switch re.Code {

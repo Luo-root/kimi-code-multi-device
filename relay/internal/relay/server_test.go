@@ -575,16 +575,17 @@ func TestHandleUp_ConfigSet(t *testing.T) {
 // ---- fake managementClient（T3 管理协议测试） ----
 
 type fakeMgmt struct {
-	mu         sync.Mutex
-	calls      []string
-	archiveErr error
-	restoreErr error
-	deleteErr  error
-	renameErr  error
-	forkNewID  string
-	forkErr    error
-	exportRes  *kimiweb.ExportResult
-	exportErr  error
+	mu                 sync.Mutex
+	calls              []string
+	archiveErr         error
+	restoreErr         error
+	deleteErr          error
+	deleteWorkspaceErr error
+	renameErr          error
+	forkNewID          string
+	forkErr            error
+	exportRes          *kimiweb.ExportResult
+	exportErr          error
 }
 
 func (f *fakeMgmt) Archive(ctx context.Context, sid string) error {
@@ -604,6 +605,12 @@ func (f *fakeMgmt) Delete(ctx context.Context, sid string) error {
 	f.calls = append(f.calls, "Delete:"+sid)
 	f.mu.Unlock()
 	return f.deleteErr
+}
+func (f *fakeMgmt) DeleteWorkspace(ctx context.Context, workDir string) error {
+	f.mu.Lock()
+	f.calls = append(f.calls, "DeleteWorkspace:"+workDir)
+	f.mu.Unlock()
+	return f.deleteWorkspaceErr
 }
 func (f *fakeMgmt) Fork(ctx context.Context, opts kimiweb.ForkOpts) (string, error) {
 	f.mu.Lock()
