@@ -65,4 +65,23 @@ void main() {
     expect(s.archiveAll(['sid-1', 'sid-2']), 0);
     expect(n, 1);
   });
+
+  test('prune：移除会话已不存在的幽灵归档 sid', () async {
+    final s = SessionArchiveStore();
+    await s.load();
+    s.archiveAll(['ghost-1', 'ghost-2', 'alive-1']);
+    // keep 为空（relay 未就绪）→ 不清理，返回 0。
+    expect(s.prune(<String>{}), 0);
+    expect(s.ids, hasLength(3));
+    // 仅 alive-1 仍存在 → 清掉 2 个幽灵。
+    final removed = s.prune({'alive-1'});
+    expect(removed, 2);
+    expect(s.ids, containsAll(['alive-1']));
+    expect(s.ids, hasLength(1));
+    // 再次 prune 无变化 → 返回 0，且不触发通知。
+    int n = 0;
+    s.addListener(() => n++);
+    expect(s.prune({'alive-1'}), 0);
+    expect(n, 0);
+  });
 }

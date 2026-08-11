@@ -10,10 +10,17 @@
 // - 没有 archived / createdAt / archivedAt 字段：归档是中继或端侧的概念。
 // - kimi acp 暂无 archive / restore / rename / fork 的官方方法。
 //
+// 更新（2026-08-06）：gap #2 已闭合，但**不是**由 acp 补齐的。kimi 本机的
+// `kimi web` 调试 RPC 本就实现了这些操作，relay 新增「通道②」代理之（见
+// relay/internal/kimiweb）。端侧协议最终没有采用当初设想的 session.rename /
+// session.fork / ... 一动作一 type，而是收敛成单一 `session.manage` + action
+// 字段（见 lib/relay/manage_messages.dart），新增动作不必再改协议。
+//
 // 这些探针测试不会触发任何网络，仅用 fixture 校验解析与派生逻辑，作为后续模型
 // 演进（archive 字段、工作区分组、时间排序、加载更多）的对照基线。
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sentinel/relay/manage_messages.dart';
 
 void main() {
   group('Kimi session.list 响应探针', () {
@@ -113,18 +120,28 @@ void main() {
       print('[probe] gap: kimi acp 未提供 archived/archivedAt 字段');
     });
 
-    test('rename / fork / export / archive 的方法名约定（gap #2）', () {
-      // gap #2: 上行消息未定义 session.rename / session.fork / session.export
-      // / session.archive / session.restore。这里按端侧需要给出建议名，
-      // 等中继在 protocol.go 中补全。
-      const wanted = <String>[
-        'session.rename',   // { sessionId, title }
-        'session.fork',     // { sessionId }  -> 下行 session.created
-        'session.export',   // { sessionId, format }  -> 下行 session.export
-        'session.archive',  // { sessionId }
-        'session.restore',  // { sessionId }
+    test('rename / fork / export / archive 已由通道② 落地（gap #2 已闭合）', () {
+      // 当初设想的「一动作一 type」（session.rename / session.fork / ...）
+      // 最终未采用：动作会持续增加，每加一个就要改两端协议。实际落地为单一
+      // 上行 type + action 字段，新增动作只加枚举值。
+      const legacyProposal = <String>[
+        'session.rename',
+        'session.fork',
+        'session.export',
+        'session.archive',
+        'session.restore',
       ];
-      expect(wanted, isNotEmpty);
+
+      expect(kUpManageSession, 'session.manage');
+      expect(kDownSessionManaged, 'session.managed');
+      // 当初想要的每个动作，现在都能表达为一个 action 取值。
+      for (final t in legacyProposal) {
+        final action = t.split('.').last;
+        expect(ManageAction.values.map((e) => e.value), contains(action),
+            reason: '$t 对应的 action 缺失');
+      }
+      // 且比当初的设想多覆盖了 delete。
+      expect(ManageAction.values.map((e) => e.value), contains('delete'));
     });
   });
 }

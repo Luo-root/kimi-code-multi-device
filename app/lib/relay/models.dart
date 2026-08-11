@@ -295,11 +295,13 @@ class RelayConfig {
   final int permTimeoutSeconds;
   final bool autoPassNonCritical;
   final String configPath;
+  final bool mgmtEnabled;
   const RelayConfig({
     required this.barkUrl,
     required this.permTimeoutSeconds,
     required this.autoPassNonCritical,
     required this.configPath,
+    this.mgmtEnabled = false,
   });
 
   factory RelayConfig.fromPayload(Map<String, dynamic> p) => RelayConfig(
@@ -307,6 +309,7 @@ class RelayConfig {
     permTimeoutSeconds: (p['permTimeoutSeconds'] as num?)?.toInt() ?? 300,
     autoPassNonCritical: p['autoPassNonCritical'] == true,
     configPath: p['configPath']?.toString() ?? '',
+    mgmtEnabled: p['mgmtEnabled'] == true,
   );
 
   /// 乐观更新：config.set 发出后本地立即反映，回执（relay.config）再以真实值覆盖。
@@ -314,11 +317,13 @@ class RelayConfig {
     String? barkUrl,
     int? permTimeoutSeconds,
     bool? autoPassNonCritical,
+    bool? mgmtEnabled,
   }) => RelayConfig(
     barkUrl: barkUrl ?? this.barkUrl,
     permTimeoutSeconds: permTimeoutSeconds ?? this.permTimeoutSeconds,
     autoPassNonCritical: autoPassNonCritical ?? this.autoPassNonCritical,
     configPath: configPath,
+    mgmtEnabled: mgmtEnabled ?? this.mgmtEnabled,
   );
 }
 

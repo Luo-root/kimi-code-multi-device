@@ -1,0 +1,11 @@
+========== initialize（声明 fsCapabilities） ==========
+
+>>> sessionId = session_9ed28c68-d0d4-4b6b-b066-928422fd043a
+
+========== session/prompt（读文件再写文件） ==========
+
+>>> 等待 kimi 完成（最多 50s）...
+
+========== 探针结束 ==========
+>>> 若上方未出现 [FS] >>>>> fs/read|write_text_file 原始请求，说明 fs/* 未路由到客户端（gap：fsCapabilities 声明形状或 kimi 仍走本地 I/O）。
+>>> 完整原始流量见 probe/fs/fs_schema_probe.log

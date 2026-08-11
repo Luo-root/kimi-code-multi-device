@@ -14,14 +14,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	acpsdk "github.com/coder/acp-go-sdk"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/acp"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/bark"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/config"
+	"github.com/Luo-root/kimi-code-multi-device/relay/internal/kimiweb"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/permit"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/replay"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/risk"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/session"
+	acpsdk "github.com/coder/acp-go-sdk"
 	"github.com/gorilla/websocket"
 )
 
@@ -66,11 +67,22 @@ type Relay struct {
 	// kimi 健康（§08 ⑥ 心跳）：false=degraded。OnExit 置 false，Restart 置 true。
 	kimiAlive bool
 
+	// mgmt 是「通道② 本机管理通道」客户端（kimi web HTTP 调试 RPC），
+	// 补齐 ACP 未覆盖的会话管理。nil = 未启用（配置关闭或无可用端点）。
+	// 用 managementClient 接口而非具体 *kimiweb.Client，便于测试注入与后续替换实现。
+	mgmt      managementClient
+	mgmtSpawn *kimiweb.SpawnProvider // 仅当 auto_start 时非空，Close 时清理子进程
+
+	// kimiVersion 是 initialize 时 kimi 下发的版本（如 "0.32.0"），
+	// 供管理操作（如 export 需要 host version）复用。
+	kimiVersion string
+	verMu       sync.RWMutex
+
 	// 权限等待表：manual 模式下 OnPermission 同步阻塞，直到端侧拍板 / 超时 / kimi 退出。
 	// key 为中继生成的 permID（json.RawMessage 形式下发给端侧，端侧原样回传）。
-	permMu     sync.Mutex
+	permMu      sync.Mutex
 	permWaiters map[string]chan permOutcome
-	permSeq    atomic.Int64
+	permSeq     atomic.Int64
 
 	mu      sync.RWMutex
 	clients map[*client]bool
@@ -114,7 +126,61 @@ func New() *Relay {
 		permWaiters:         map[string]chan permOutcome{},
 	}
 	r.permit = permit.New(r.onPermTimeout)
+	r.initManagement()
 	return r
+}
+
+// initManagement 依据配置装配「通道② 本机管理通道」客户端（kimi web 调试 RPC）。
+// 配置关闭时 mgmt 保持 nil，后续管理类请求将返回明确错误。
+// auto_start 走 SpawnProvider（懒启动，首次管理调用才拉起 kimi web）。
+func (r *Relay) initManagement() {
+	kw := r.cfg.KimiWeb
+	if !kw.Enabled {
+		return
+	}
+	if kw.AutoStart {
+		// 管理动作走 REST :action（磁盘直读），实测**不需要** --debug-endpoints，
+		// 故不再强制开启，仅在配置显式要求时透传（用于 /api/v1/debug/* 调试面）。
+		sp := &kimiweb.SpawnProvider{
+			DebugEndpoints: kw.DebugEndpoints,
+			Port:           kw.Port,
+			Token:          kw.Token,
+		}
+		r.mgmtSpawn = sp
+		r.mgmt = kimiweb.New(sp)
+		port := kw.Port
+		if port == 0 {
+			port = kimiweb.DefaultPort
+		}
+		log.Printf("[relay] 管理通道：auto_start kimi web（首次调用时优先复用已运行实例，端口 %d）", port)
+		return
+	}
+	if kw.BaseURL != "" {
+		r.mgmt = kimiweb.New(kimiweb.StaticProvider{BaseURL: kw.BaseURL, Token: kw.Token})
+		log.Printf("[relay] 管理通道：直连 kimi web %s", kw.BaseURL)
+		return
+	}
+	log.Printf("[relay] 管理通道已 enabled 但缺少 base_url 或 auto_start，管理功能不可用")
+}
+
+// managementClient 是「通道② 本机管理通道」的抽象（由 kimiweb.Client 实现）。
+// 用接口而非具体类型，便于测试注入伪造实现，也方便后续替换底层通道。
+type managementClient interface {
+	Archive(ctx context.Context, sessionID string) error
+	Restore(ctx context.Context, sessionID string, opts *kimiweb.RestoreOpts) error
+	Delete(ctx context.Context, sessionID string) error
+	DeleteWorkspace(ctx context.Context, workDir string) error
+	Fork(ctx context.Context, opts kimiweb.ForkOpts) (string, error)
+	Rename(ctx context.Context, sessionID, title string) error
+	Export(ctx context.Context, sessionID string, opts kimiweb.ExportOpts) (*kimiweb.ExportResult, error)
+}
+
+// management 返回管理客户端；未启用时返回错误，供上层（T3 协议）转译为端侧提示。
+func (r *Relay) management() (managementClient, error) {
+	if r.mgmt == nil {
+		return nil, fmt.Errorf("kimi web 管理通道未启用（relay.toml [kimiweb] enabled=true 并配置 base_url/token 或 auto_start）")
+	}
+	return r.mgmt, nil
 }
 
 func (r *Relay) Start() error {
@@ -152,9 +218,9 @@ func (r *Relay) Start() error {
 }
 
 // afterInitialize 在 initialize 成功后做的规范对齐动作：
-// 1) 记录 kimi 下发的 agentCapabilities / authMethods（ACP 规范要求 initialize 返回能力矩阵）；
-// 2) 补 authenticate 握手（method_id='login'）。已登录环境通常直接成功；
-//    返回 authRequired(-32000) 时 best-effort 忽略，不阻断启动（当前环境无需鉴权即可 session/new）。
+//  1. 记录 kimi 下发的 agentCapabilities / authMethods（ACP 规范要求 initialize 返回能力矩阵）；
+//  2. 补 authenticate 握手（method_id='login'）。已登录环境通常直接成功；
+//     返回 authRequired(-32000) 时 best-effort 忽略，不阻断启动（当前环境无需鉴权即可 session/new）。
 func (r *Relay) afterInitialize(ctx context.Context, res acpsdk.InitializeResponse) {
 	r.logAgentCapabilities(res)
 	if err := r.authenticate(ctx); err != nil {
@@ -179,6 +245,9 @@ func (r *Relay) authenticate(ctx context.Context) error {
 func (r *Relay) logAgentCapabilities(res acpsdk.InitializeResponse) {
 	if res.AgentInfo != nil {
 		log.Printf("[relay] kimi agentInfo name=%s version=%s", res.AgentInfo.Name, res.AgentInfo.Version)
+		r.verMu.Lock()
+		r.kimiVersion = res.AgentInfo.Version
+		r.verMu.Unlock()
 	}
 	if b, err := json.Marshal(res.AgentCapabilities); err == nil {
 		log.Printf("[relay] kimi capabilities=%s", string(b))
@@ -191,6 +260,9 @@ func (r *Relay) logAgentCapabilities(res acpsdk.InitializeResponse) {
 func (r *Relay) Close() {
 	if r.acp != nil {
 		r.acp.Close()
+	}
+	if r.mgmtSpawn != nil {
+		_ = r.mgmtSpawn.Close()
 	}
 }
 
@@ -226,6 +298,18 @@ func (r *Relay) refreshHistory(ctx context.Context) error {
 			m.UpdatedAt = *s.UpdatedAt
 		}
 		metas = append(metas, m)
+	}
+	// 兜底：ACP 在某些版本/状态下会返回空列表（如 kimi 0.32.0 运行时未加载磁盘会话），
+	// 但存储里实际有数据。此时直接从 session_index.jsonl + state.json 读取，保证抽屉
+	// 与磁盘一致。
+	if len(metas) == 0 && r.kimiHome != "" {
+		fromDisk, diskErr := replay.ListSessionsFromDisk(r.kimiHome)
+		if diskErr == nil && len(fromDisk) > 0 {
+			log.Printf("[relay] ACP ListSessions 返回空，从磁盘读取到 %d 条会话", len(fromDisk))
+			metas = fromDisk
+		} else if diskErr != nil {
+			log.Printf("[relay] 从磁盘读取会话列表失败: %v", diskErr)
+		}
 	}
 	r.store.SetHistory(metas)
 	return nil
@@ -540,6 +624,7 @@ func (r *Relay) relayConfigLocked() DownRelayConfigPayload {
 		PermTimeoutSeconds:  r.cfg.Permission.TimeoutSeconds,
 		AutoPassNonCritical: r.cfg.Permission.AutoPassNonCritical,
 		ConfigPath:          r.cfgPath,
+		MgmtEnabled:         r.mgmt != nil,
 	}
 }
 
@@ -768,10 +853,163 @@ func (r *Relay) handleUp(c *client, data []byte) {
 			r.store.Remove(sid)
 			r.broadcast(Env{Type: DownSessionClosed, SessionID: sid})
 		}()
+	case UpManageSession:
+		var p UpManageSessionPayload
+		_ = json.Unmarshal(e.Payload, &p)
+		r.handleManageSession(c, p)
 	}
 }
 
 func mustJSON(v any) json.RawMessage {
 	b, _ := json.Marshal(v)
 	return b
+}
+
+// handleManageSession 处理端侧发起的会话管理操作（通道② 补齐 ACP 缺口）。
+// 结果定向回给发起端 c；成功后广播刷新会话列表，使所有端看到最新状态。
+func (r *Relay) handleManageSession(c *client, p UpManageSessionPayload) {
+	sid := p.SessionID
+	log.Printf("[relay] session.manage action=%s sessionId=%s", p.Action, sid)
+	reply := func(ok bool, errMsg string, data json.RawMessage) {
+		log.Printf("[relay] session.managed action=%s sessionId=%s ok=%v error=%q", p.Action, sid, ok, errMsg)
+		r.sendBlocking(c, Env{
+			Type:      DownSessionManaged,
+			SessionID: sid,
+			Payload: mustJSON(DownSessionManagedPayload{
+				Action: p.Action, SessionID: sid, WorkDir: p.WorkDir, Ok: ok, Error: errMsg, Data: data,
+			}),
+		})
+	}
+
+	if sid == "" && p.Action != ManageActionDeleteWorkspace {
+		reply(false, "session.manage 缺少 sessionId", nil)
+		return
+	}
+	if p.Action == ManageActionDeleteWorkspace && p.WorkDir == "" {
+		reply(false, "session.manage deleteWorkspace 缺少 workDir", nil)
+		return
+	}
+	mgmt, err := r.management()
+	if err != nil {
+		reply(false, enrichMgmtErr(err), nil)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	switch p.Action {
+	case ManageActionArchive:
+		if err := mgmt.Archive(ctx, sid); err != nil {
+			reply(false, enrichMgmtErr(err), nil)
+			return
+		}
+	case ManageActionRestore:
+		if err := mgmt.Restore(ctx, sid, nil); err != nil {
+			reply(false, enrichMgmtErr(err), nil)
+			return
+		}
+	case ManageActionDelete:
+		if err := mgmt.Delete(ctx, sid); err != nil {
+			reply(false, enrichMgmtErr(err), nil)
+			return
+		}
+	case ManageActionDeleteWorkspace:
+		if err := mgmt.DeleteWorkspace(ctx, p.WorkDir); err != nil {
+			reply(false, enrichMgmtErr(err), nil)
+			return
+		}
+	case ManageActionRename:
+		if p.Title == "" {
+			reply(false, "rename 需要 title", nil)
+			return
+		}
+		if err := mgmt.Rename(ctx, sid, p.Title); err != nil {
+			reply(false, enrichMgmtErr(err), nil)
+			return
+		}
+	case ManageActionFork:
+		newID, err := mgmt.Fork(ctx, kimiweb.ForkOpts{
+			SourceSessionID: sid,
+			Title:           p.Title,
+			NewSessionID:    p.NewSessionID,
+		})
+		if err != nil {
+			reply(false, enrichMgmtErr(err), nil)
+			return
+		}
+		reply(true, "", mustJSON(struct {
+			NewSessionID string `json:"newSessionId"`
+		}{NewSessionID: newID}))
+		go r.listSessions()
+		return
+	case ManageActionExport:
+		opts := kimiweb.ExportOpts{Version: r.kimiVersionLocked()}
+		if len(p.Options) > 0 {
+			var o struct {
+				Version    string `json:"version"`
+				OutputPath string `json:"outputPath"`
+			}
+			if err := json.Unmarshal(p.Options, &o); err == nil {
+				if o.Version != "" {
+					opts.Version = o.Version
+				}
+				opts.OutputPath = o.OutputPath
+			}
+		}
+		res, err := mgmt.Export(ctx, sid, opts)
+		if err != nil {
+			reply(false, enrichMgmtErr(err), nil)
+			return
+		}
+		reply(true, "", mustJSON(res))
+		return
+	default:
+		reply(false, "未知管理操作: "+p.Action, nil)
+		return
+	}
+
+	// 归档/恢复/删除/重命名成功：刷新会话列表让所有端看到最新状态。
+	go r.listSessions()
+	reply(true, "", nil)
+}
+
+// kimiVersionLocked 读取缓存的 kimi 版本（调用方无需持锁）。
+func (r *Relay) kimiVersionLocked() string {
+	r.verMu.RLock()
+	defer r.verMu.RUnlock()
+	return r.kimiVersion
+}
+
+// enrichMgmtErr 把管理通道的错误转译为端侧可懂的提示。
+//
+// kimi 的原始错误对用户完全不可自解释，这里把三类高频错误翻成可操作的中文：
+//   - 50001 storage write failed：另有 kimi web 持有会话存储的独占写锁（单写者约束）。
+//     典型场景是用户自己开着 kimi web，relay 又起了第二个实例。
+//   - 40401 session not found：会话未加载进 kimi web 运行时（仅调试 RPC 路径会遇到；
+//     REST :action 走磁盘直读，正常不会命中）。
+//   - ErrUnsupported：kimi 该版本压根没提供此动作的接口（当前 rename/delete 均已
+//     有实现路径，此分支作为未来接口回退时的兜底，一般不再触发）。
+func enrichMgmtErr(err error) string {
+	if errors.Is(err, kimiweb.ErrUnsupported) {
+		// 端侧已按 kKimiUnsupportedActions 在菜单禁用并提示，理论上不会走到这里；
+		// 若仍触发（例如未来协议扩展），给一条干净、不含内部前缀的中文说明。
+		return "当前 kimi 版本未提供该管理动作的接口，操作无法执行"
+	}
+	if errors.Is(err, replay.ErrSessionNotFound) {
+		return "该会话不存在或已被删除，请刷新会话列表后重试。"
+	}
+	if errors.Is(err, replay.ErrWorkspaceNotFound) {
+		return "该工作区不存在或已被删除，请刷新会话列表后重试。"
+	}
+	if re, ok := kimiweb.IsRPCError(err); ok {
+		switch re.Code {
+		case kimiweb.CodeStorageWriteFailed:
+			return "检测到另一个 kimi web 正在运行并占用会话存储的写锁，操作被拒绝。" +
+				"kimi 同一时刻只允许一个进程写会话数据，请关闭其他 kimi web 后重试。(" + err.Error() + ")"
+		case kimiweb.CodeSessionNotFound:
+			return "kimi 未能找到该会话（可能已被删除，或未加载进 kimi web 运行时）。" +
+				"请刷新会话列表后重试。(" + err.Error() + ")"
+		}
+	}
+	return err.Error()
 }
