@@ -5,6 +5,7 @@ import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:hux/hux.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:file_picker/file_picker.dart';
 import '../relay/models.dart';
 import '../relay/relay_client.dart';
 import '../relay/manage_messages.dart';
@@ -37,6 +38,24 @@ const _kComposerVerticalPadding = 8.0;
 
 // chip = 你的自由文本常用语（点选即发）；slash = Kimi 命令（来自 available_commands）。
 const _chips = ['跑下测试', 'commit 一下', '解释刚干了啥'];
+
+// 视作图片的扩展名（文件名兜底判断，不依赖 MIME 探测）。
+const _kImageExts = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.heic'];
+
+/// 把扩展名映射成 image/* 的 subtype（png/jpeg/webp…），缺省 png。
+String _extToSubtype(String name) {
+  final dot = name.lastIndexOf('.');
+  if (dot < 0 || dot == name.length - 1) return 'png';
+  final ext = name.substring(dot + 1).toLowerCase();
+  switch (ext) {
+    case 'jpg':
+      return 'jpeg';
+    case 'jpeg':
+      return 'jpeg';
+    default:
+      return ext;
+  }
+}
 
 // 思考强度：会话级 ACP 切法待探针确认，此刀占位（受控本地态，不下发）。
 const _effortOpts = [
@@ -124,6 +143,14 @@ class _HomeShellState extends State<HomeShell> {
   final _archive = SessionArchiveStore();
   final _inputCtrl = TextEditingController();
   final _scrollCtrl = ScrollController();
+  /// 当前 composer 待发送的附件（图片 / 文件），发送后清空。
+  final List<Attachment> _pendingAttachments = [];
+  /// 提示词优化状态机：idle（可优化）→ enhancing（kimi 改写中）→ enhanced（已替换，可还原）。
+  String _enhancePhase = 'idle';
+  /// 优化前的原文，用于「还原」。
+  String? _enhanceOriginal;
+  /// 输入框是否有非空文字：控制优化图标显隐，随输入实时重建。
+  bool _hasText = false;
   final _dockKey = GlobalKey();
   final _groupKeys = <int, GlobalKey>{};
 
@@ -159,7 +186,7 @@ class _HomeShellState extends State<HomeShell> {
   @override
   void initState() {
     super.initState();
-    _client.onMessage = _store.handle;
+    _client.onMessage = _onRelayMessage;
     _client.onOpen = () => _store.markConnected();
     _client.onClose = () => _store.markDisconnected(reconnecting: true);
     _client.onReconnecting = () => _store.markDisconnected(reconnecting: true);
@@ -395,10 +422,12 @@ class _HomeShellState extends State<HomeShell> {
     return 0;
   }
 
-  void _send(String text) {
+  void _send(String text, [List<Attachment>? attachments]) {
     final t = text.trim();
     final sid = _store.currentSid;
-    if (t.isEmpty || sid == null || _store.relayState != 'ok') return;
+    final atts = attachments ?? _pendingAttachments;
+    if (t.isEmpty && atts.isEmpty) return;
+    if (sid == null || _store.relayState != 'ok') return;
     // §UX-5.1-2：busy 时不再静默吞掉发送——给出明确反馈。
     if (_store.busyOf(sid)) {
       showAppToast(
@@ -408,14 +437,31 @@ class _HomeShellState extends State<HomeShell> {
       );
       return;
     }
-    _store.addUser(sid, t);
+    _store.addUser(sid, t, atts);
+    // 发送后清理提示词优化状态（已落为准，不再保留还原点）。
+    _enhancePhase = 'idle';
+    _enhanceOriginal = null;
     // prompt 已经写入 WS 后立即进入 running，避免 relay 的 busy 广播
     // 与当前帧之间出现 send 按钮仍可见、无法中断的空窗。
     _store.setBusy(sid, true);
-    _client.send('prompt', sid: sid, payload: {'text': t});
+    final payload = <String, dynamic>{'text': t};
+    if (atts.isNotEmpty) {
+      payload['attachments'] = atts
+          .map((a) => {
+                'name': a.name,
+                'mimeType': a.mimeType,
+                'path': a.path,
+              })
+          .toList();
+    }
+    _client.send('prompt', sid: sid, payload: payload);
     HapticFeedback.lightImpact(); // §UX-8.2-2：发送 = .light。
     _inputCtrl.clear();
-    setState(() => _slashQuery = null);
+    _pendingAttachments.clear();
+    setState(() {
+      _slashQuery = null;
+      _hasText = false;
+    });
     // 自己发的消息：强制滚到底，确保看到最新。
     _atBottom = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -436,9 +482,79 @@ class _HomeShellState extends State<HomeShell> {
     _store.removeActive(sid);
   }
 
+  /// 中继下行消息统一入口：先交给 store 解析，再分流提示词优化结果。
+  void _onRelayMessage(String type, String? sid, Map<String, dynamic> payload) {
+    _store.handle(type, sid, payload);
+    if (type == 'enhance_result') _onEnhanceResult(payload);
+  }
+
+  /// 提示词优化：idle 时请求 kimi 改写当前输入；enhanced 时还原到原文。
+  void _onEnhance() {
+    if (_enhancePhase == 'enhancing') return;
+    if (_enhancePhase == 'enhanced') {
+      // 还原：把输入框恢复为优化前原文。
+      final original = _enhanceOriginal ?? '';
+      _inputCtrl.value = TextEditingValue(
+        text: original,
+        selection: TextSelection.collapsed(offset: original.length),
+      );
+      _onInputChanged(original);
+      setState(() {
+        _enhancePhase = 'idle';
+        _enhanceOriginal = null;
+      });
+      return;
+    }
+    final text = _inputCtrl.text;
+    if (text.trim().isEmpty) {
+      showAppToast(context, message: '先输入要优化的提示词');
+      return;
+    }
+    final sid = _store.currentSid;
+    if (sid == null || _store.relayState != 'ok') {
+      showAppToast(context,
+          message: '中继未连接，无法优化', variant: AppToastVariant.warning);
+      return;
+    }
+    // 记住原文（用于还原），再请求 kimi 改写。
+    _enhanceOriginal = text;
+    setState(() => _enhancePhase = 'enhancing');
+    _client.send('enhance', sid: sid, payload: {'text': text});
+  }
+
+  /// 处理 relay 回传的优化结果：成功则回填输入框并进入 enhanced，失败则提示。
+  void _onEnhanceResult(Map<String, dynamic> payload) {
+    final error = payload['error']?.toString();
+    if (error != null && error.isNotEmpty) {
+      setState(() => _enhancePhase = 'idle');
+      showAppToast(context,
+          message: '优化失败：$error', variant: AppToastVariant.error);
+      return;
+    }
+    final enhanced = payload['enhanced']?.toString() ?? '';
+    if (enhanced.trim().isEmpty) {
+      setState(() => _enhancePhase = 'idle');
+      showAppToast(context,
+          message: '未获取到优化结果', variant: AppToastVariant.warning);
+      return;
+    }
+    _inputCtrl.value = TextEditingValue(
+      text: enhanced,
+      selection: TextSelection.collapsed(offset: enhanced.length),
+    );
+    _onInputChanged(enhanced);
+    setState(() => _enhancePhase = 'enhanced');
+  }
+
   void _onInputChanged(String v) {
     final q = (v.startsWith('/') && !v.contains(' ')) ? v.substring(1) : null;
-    if (q != _slashQuery) setState(() => _slashQuery = q);
+    final hasText = v.trim().isNotEmpty;
+    if (q != _slashQuery || hasText != _hasText) {
+      setState(() {
+        _slashQuery = q;
+        _hasText = hasText;
+      });
+    }
   }
 
   void _pickSlash(String s) {
@@ -450,8 +566,44 @@ class _HomeShellState extends State<HomeShell> {
     });
   }
 
-  void _onAttach() {
-    showAppToast(context, message: '附件上传即将支持');
+  /// 添加图片：调起 file_picker 的媒体类型，多选。
+  Future<void> _onAttachImage() async => _pickAttachments(FileType.media, true);
+
+  /// 添加文件：调起 file_picker 的任意文件类型，多选。
+  Future<void> _onAttachFile() async => _pickAttachments(FileType.any, false);
+
+  Future<void> _pickAttachments(FileType type, bool imageChoice) async {
+    final result = await FilePicker.platform.pickFiles(
+      allowMultiple: true,
+      type: type,
+      withData: false, // 仅取路径，避免大文件占内存；后续直读文件发送。
+    );
+    if (result == null || result.paths.isEmpty) return;
+    final added = <Attachment>[];
+    for (final p in result.paths) {
+      if (p == null) continue;
+      final name = p.split(RegExp(r'[/\\]')).last;
+      final isImage = imageChoice ||
+          _kImageExts.any((e) => name.toLowerCase().endsWith(e));
+      added.add(Attachment(
+        name: name,
+        path: p,
+        isImage: isImage,
+        mimeType: isImage ? 'image/${_extToSubtype(name)}' : null,
+        size: _fileSize(p),
+      ));
+    }
+    if (added.isEmpty) return;
+    setState(() => _pendingAttachments.addAll(added));
+    HapticFeedback.lightImpact();
+  }
+
+  int? _fileSize(String path) {
+    try {
+      return File(path).lengthSync();
+    } catch (_) {
+      return null;
+    }
   }
 
   /// §UX-7.2-3：relay.error 可见化——非阻断 toast 展示错误摘要，
@@ -690,8 +842,8 @@ class _HomeShellState extends State<HomeShell> {
     final dockH = _dockH; // 动态测量，替代写死的 360/230/150
     // §13「停」随 AI 输出态：busy（session/prompt 进行中）时显眼，输出完退场。
     final running = sid != null && _store.busyOf(sid);
-    // §3 生成状态动效：AI 输出全程（running）持续显示呼吸光点，直至输出结束收起。
-    // 等待首 token（最后一块还是 user，AI 块未出现）时，标识作为列表尾部占位；
+    // §3 生成状态动效：当前思考/工具步骤的文字流光表达「正在执行」。
+    // 等待首 token（最后一块还是 user，AI 块未出现）时，身份标识作为列表尾部占位；
     // 一旦 AI 块出现，标识改在轮起点渲染（见 itemBuilder）。
     final needTailIdentity =
         running && (blocks.isEmpty || blocks.last.kind == BlockKind.user);
@@ -856,18 +1008,6 @@ class _HomeShellState extends State<HomeShell> {
                           },
                         ),
                       ),
-                  // §3.2-4 全局生成状态条：busy 全程 2px indeterminate 进度，输出完收起。
-                  if (running)
-                    Positioned(
-                      top: 0,
-                      left: 0,
-                      right: 0,
-                      child: LinearProgressIndicator(
-                        backgroundColor: Colors.transparent,
-                        color: AppColors.accentOf(context),
-                        minHeight: 2,
-                      ),
-                    ),
                   // 双行为导航：向下滚时回到底部；向上滚时回最近一条用户对话。
                   if (!_atBottom && blocks.isNotEmpty)
                     Positioned(
@@ -908,15 +1048,22 @@ class _HomeShellState extends State<HomeShell> {
                             running: running,
                             pending: perm,
                             controller: _inputCtrl,
+                            attachments: _pendingAttachments,
+                            onRemoveAttachment: (i) =>
+                                setState(() => _pendingAttachments.removeAt(i)),
                             onSend: _send,
                             onStop: _cancelCurrent,
                             onChanged: _onInputChanged,
-                            onOpenPlus: _onAttach,
+                            onAttachImage: _onAttachImage,
+                            onAttachFile: _onAttachFile,
                             onChip: _send,
                             slashOpen: slashOpen && slashOpts.isNotEmpty,
                             slashOpts: slashOpts,
                             onPickSlash: _pickSlash,
                             onDecide: _decide,
+                            enhancePhase: _enhancePhase,
+                            hasText: _hasText,
+                            onEnhance: _onEnhance,
                           ),
                         ),
                       ),
@@ -2641,30 +2788,42 @@ class _BottomDock extends StatelessWidget {
   final bool running;
   final PermissionRequest? pending;
   final TextEditingController controller;
+  final List<Attachment> attachments;
+  final ValueChanged<int> onRemoveAttachment;
   final ValueChanged<String> onSend;
   final VoidCallback onStop;
   final ValueChanged<String> onChanged;
-  final VoidCallback onOpenPlus;
+  final VoidCallback onAttachImage;
+  final VoidCallback onAttachFile;
   final ValueChanged<String> onChip;
   final bool slashOpen;
   final List<String> slashOpts;
   final ValueChanged<String> onPickSlash;
   final ValueChanged<PermOption> onDecide;
+  final String enhancePhase;
+  final bool hasText;
+  final VoidCallback onEnhance;
 
   const _BottomDock({
     required this.enabled,
     required this.running,
     required this.pending,
     required this.controller,
+    this.attachments = const [],
+    required this.onRemoveAttachment,
     required this.onSend,
     required this.onStop,
     required this.onChanged,
-    required this.onOpenPlus,
+    required this.onAttachImage,
+    required this.onAttachFile,
     required this.onChip,
     required this.slashOpen,
     required this.slashOpts,
     required this.onPickSlash,
     required this.onDecide,
+    this.enhancePhase = 'idle',
+    this.hasText = false,
+    required this.onEnhance,
   });
 
   @override
@@ -2694,6 +2853,13 @@ class _BottomDock extends StatelessWidget {
                 ),
                 const SizedBox(height: 8),
               ],
+              // 待发送附件预览：发送前在 composer 上方平铺，可单独移除。
+              if (attachments.isNotEmpty)
+                _AttachmentPreviewRow(
+                  attachments: attachments,
+                  onRemove: onRemoveAttachment,
+                ),
+              const SizedBox(height: 8),
               SizedBox(
                 height: 34,
                 child: ListView.separated(
@@ -2742,13 +2908,105 @@ class _BottomDock extends StatelessWidget {
                   onSend: onSend,
                   onStop: onStop,
                   onChanged: onChanged,
-                  onOpenPlus: onOpenPlus,
+                  onAttachImage: onAttachImage,
+                  onAttachFile: onAttachFile,
+                  enhancePhase: enhancePhase,
+                  hasText: hasText,
+                  onEnhance: onEnhance,
                 ),
               ),
             ],
           ),
         ),
       ],
+    );
+  }
+}
+
+/// composer 上方待发送附件：aicss 风格紧凑 chip（图标 + 文件名 + 移除 X）。
+/// 图片与文件统一以 chip 呈现，不再用大缩略图，避免纵向占用输入区。
+class _AttachmentPreviewRow extends StatelessWidget {
+  final List<Attachment> attachments;
+  final ValueChanged<int> onRemove;
+  const _AttachmentPreviewRow({
+    required this.attachments,
+    required this.onRemove,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+          AppSpacing.pageMargin, 0, AppSpacing.pageMargin, 8),
+      child: Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          for (var i = 0; i < attachments.length; i++)
+            _AttachmentChip(
+              attachment: attachments[i],
+              onRemove: () => onRemove(i),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AttachmentChip extends StatelessWidget {
+  final Attachment attachment;
+  final VoidCallback onRemove;
+  const _AttachmentChip({
+    required this.attachment,
+    required this.onRemove,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isImg = attachment.isImage;
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 230),
+      padding: const EdgeInsets.only(left: 9, right: 4, top: 5, bottom: 5),
+      decoration: BoxDecoration(
+        color: AppColors.quietSurfaceOf(context),
+        border: Border.all(color: AppColors.hairlineOf(context)),
+        borderRadius: BorderRadius.circular(AppRadius.pill),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            isImg ? AppIcons.image : AppIcons.paperclip,
+            size: 13,
+            color: AppColors.textSecondaryOf(context),
+          ),
+          const SizedBox(width: 6),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 160),
+            child: Text(
+              attachment.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AppText.monoCaption
+                  .copyWith(color: AppColors.textPrimaryOf(context)),
+            ),
+          ),
+          const SizedBox(width: 4),
+          GestureDetector(
+            onTap: onRemove,
+            child: Container(
+              width: 17,
+              height: 17,
+              decoration: BoxDecoration(
+                color: AppColors.contentCanvasOf(context),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(AppIcons.close,
+                  size: 10, color: AppColors.textSecondaryOf(context)),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -2796,6 +3054,49 @@ class _SlashPanel extends StatelessWidget {
   }
 }
 
+/// composer 右侧的「优化提示词 / 还原」药丸：与 aicss 的 Enhance Pill 同语义。
+/// enhancing 阶段显示转圈，避免按钮空等；enhanced 后变「还原」图标可一键退回原文。
+/// idle/enhanced 时用圆形图标按钮（优化 = sparkles(AppIcons.enhance)，还原 = rotate_ccw），比文字药丸更简约；
+/// 无文字输入时不显示，保持 composer 极简（enabling 进行中始终显示转圈）。
+class _EnhancePill extends StatelessWidget {
+  final String phase;
+  final bool hasText;
+  final VoidCallback onTap;
+  const _EnhancePill({
+    required this.phase,
+    required this.hasText,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // 空输入且非进行中：隐藏入口。
+    if (!hasText && phase != 'enhancing') return const SizedBox.shrink();
+    if (phase == 'enhancing') {
+      return const SizedBox(
+        width: 26,
+        height: 26,
+        child: CircularProgressIndicator(strokeWidth: 2),
+      );
+    }
+    final enhanced = phase == 'enhanced';
+    return Tooltip(
+      message: enhanced ? '还原' : '优化提示词',
+      child: _circleIconBtn(
+        bg: enhanced ? AppColors.accentOf(context) : AppColors.surfaceOf(context),
+        icon: enhanced ? AppIcons.revert : AppIcons.enhance,
+        iconColor: enhanced
+            ? AppColors.surfaceOf(context)
+            : AppColors.textPrimaryOf(context),
+        onTap: onTap,
+      ),
+    );
+  }
+}
+
+/// composer + 按钮下拉菜单项。
+enum _AttachMenuItem { image, file }
+
 class ComposerInputBar extends StatelessWidget {
   final bool enabled;
   final bool running;
@@ -2803,7 +3104,11 @@ class ComposerInputBar extends StatelessWidget {
   final ValueChanged<String> onSend;
   final VoidCallback onStop;
   final ValueChanged<String> onChanged;
-  final VoidCallback onOpenPlus;
+  final VoidCallback onAttachImage;
+  final VoidCallback onAttachFile;
+  final String enhancePhase;
+  final bool hasText;
+  final VoidCallback onEnhance;
   const ComposerInputBar({
     super.key,
     required this.enabled,
@@ -2812,7 +3117,11 @@ class ComposerInputBar extends StatelessWidget {
     required this.onSend,
     required this.onStop,
     required this.onChanged,
-    required this.onOpenPlus,
+    required this.onAttachImage,
+    required this.onAttachFile,
+    this.enhancePhase = 'idle',
+    this.hasText = false,
+    required this.onEnhance,
   });
   @override
   Widget build(BuildContext context) {
@@ -2858,12 +3167,60 @@ class ComposerInputBar extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          _circleIconBtn(
+          // + 按钮：aicss 风格的内联下拉菜单（图片 / 文件），替代原来的居中 dialog。
+          PopupMenuButton<_AttachMenuItem>(
             key: const ValueKey('composer-plus'),
-            bg: AppColors.surfaceOf(context),
-            icon: AppIcons.plus,
-            iconColor: AppColors.textPrimaryOf(context),
-            onTap: onOpenPlus,
+            offset: const Offset(0, -108),
+            tooltip: '添加附件',
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(AppRadius.card),
+            ),
+            color: AppColors.surfaceOf(context),
+            elevation: 4,
+            child: IgnorePointer(
+              child: _circleIconBtn(
+                bg: AppColors.surfaceOf(context),
+                icon: AppIcons.plus,
+                iconColor: AppColors.textPrimaryOf(context),
+                onTap: () {},
+              ),
+            ),
+            itemBuilder: (context) => [
+              PopupMenuItem(
+                value: _AttachMenuItem.image,
+                height: 42,
+                child: Row(
+                  children: [
+                    Icon(AppIcons.image,
+                        size: 18, color: AppColors.textPrimaryOf(context)),
+                    const SizedBox(width: 10),
+                    Text('图片', style: AppText.callout),
+                  ],
+                ),
+              ),
+              PopupMenuItem(
+                value: _AttachMenuItem.file,
+                height: 42,
+                child: Row(
+                  children: [
+                    Icon(AppIcons.paperclip,
+                        size: 18, color: AppColors.textPrimaryOf(context)),
+                    const SizedBox(width: 10),
+                    Text('文件', style: AppText.callout),
+                  ],
+                ),
+              ),
+            ],
+            onSelected: (value) {
+              switch (value) {
+                case _AttachMenuItem.image:
+                  onAttachImage();
+                  break;
+                case _AttachMenuItem.file:
+                  onAttachFile();
+                  break;
+              }
+            },
           ),
           const SizedBox(width: AppSpacing.sm),
           Expanded(
@@ -2911,6 +3268,10 @@ class ComposerInputBar extends StatelessWidget {
             ),
           ),
           const SizedBox(width: AppSpacing.sm),
+          // 提示词优化：enhancing 显示转圈，其余显示图标按钮（空闲 sparkles(AppIcons.enhance) / 还原 rotate_ccw），
+          // 无文字输入时隐藏（hasText=false）。
+          _EnhancePill(phase: enhancePhase, hasText: hasText, onTap: onEnhance),
+          const SizedBox(width: AppSpacing.sm),
           // §13「停」可见性随状态：流式中亮且显眼（圆 + reject 红），空闲时是发送（圆 + 黑）。
           if (running)
             _circleIconBtn(
@@ -2932,35 +3293,35 @@ class ComposerInputBar extends StatelessWidget {
       ),
     );
   }
+}
 
-  /// 36×36 圆形图标按钮：与 + 按钮共用同一形状，三键视觉对齐。
-  /// disabled 时整体 0.45 透明，比换灰底色更克制、不抢焦点。
-  Widget _circleIconBtn({
-    Key? key,
-    required Color bg,
-    required IconData icon,
-    required Color iconColor,
-    required VoidCallback? onTap,
-  }) {
-    final isEnabled = onTap != null;
-    return Opacity(
-      opacity: isEnabled ? 1.0 : 0.45,
-      key: key,
-      child: Material(
-        color: bg,
-        shape: const CircleBorder(),
-        child: InkWell(
-          customBorder: const CircleBorder(),
-          onTap: onTap,
-          child: SizedBox(
-            width: 36,
-            height: 36,
-            child: Icon(icon, size: 18, color: iconColor),
-          ),
+/// 36×36 圆形图标按钮：与 + / 发送 / 优化按钮共用同一形状，视觉对齐。
+/// disabled 时整体 0.45 透明，比换灰底色更克制、不抢焦点。
+Widget _circleIconBtn({
+  Key? key,
+  required Color bg,
+  required IconData icon,
+  required Color iconColor,
+  required VoidCallback? onTap,
+}) {
+  final isEnabled = onTap != null;
+  return Opacity(
+    opacity: isEnabled ? 1.0 : 0.45,
+    key: key,
+    child: Material(
+      color: bg,
+      shape: const CircleBorder(),
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: onTap,
+        child: SizedBox(
+          width: 36,
+          height: 36,
+          child: Icon(icon, size: 18, color: iconColor),
         ),
       ),
-    );
-  }
+    ),
+  );
 }
 
 // ---------- 批准浮层（真实 permission）----------

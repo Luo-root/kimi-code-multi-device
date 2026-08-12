@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Luo-root/kimi-code-multi-device/relay/internal/acp"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/bark"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/config"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/kimiweb"
@@ -31,6 +32,7 @@ func newTestRelay(t *testing.T) (*Relay, chan []byte) {
 		autoPassNonCritical: false,
 		permWaiters:         map[string]chan permOutcome{},
 		clients:             map[*client]bool{},
+		enhanceSessions:     map[string]struct{}{},
 		cfg:                 &config.Config{},
 		cfgPath:             "",
 	}
@@ -120,7 +122,7 @@ func (f *fakeACP) ResumeSession(ctx context.Context, sid, cwd string) ([]acpsdk.
 	f.mu.Unlock()
 	return nil, nil
 }
-func (f *fakeACP) Prompt(ctx context.Context, sid, text string) error {
+func (f *fakeACP) Prompt(ctx context.Context, sid, text string, attachments []acp.PromptAttachment) error {
 	f.mu.Lock()
 	f.calls = append(f.calls, "Prompt:"+sid)
 	err := f.promptErr

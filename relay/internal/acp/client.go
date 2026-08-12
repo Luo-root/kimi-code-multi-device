@@ -15,12 +15,14 @@ package acp
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -212,13 +214,49 @@ func (c *Client) ResumeSession(ctx context.Context, sid, cwd string) ([]acpsdk.S
 	return resp.ConfigOptions, nil
 }
 
+// PromptAttachment 描述一条随 prompt 上传的附件。
+// Path 为本机绝对路径（relay 与 kimi 同机运行，可直接读取）：
+// - 图片：relay 读取并 base64 内联为 ContentBlockImage；
+// - 其它文件：以 file:// URI 作为 resource_link 交给 kimi 按需读取。
+type PromptAttachment struct {
+	Name     string `json:"name"`
+	MimeType string `json:"mimeType"`
+	Path     string `json:"path"`
+}
+
 // Prompt 发送一轮对话并等待完成（流式 update 由 SDK 回调投递）。
-func (c *Client) Prompt(ctx context.Context, sid, text string) error {
+// attachments 可携带图片 / 文件，随文本一起进入同一轮 prompt。
+func (c *Client) Prompt(ctx context.Context, sid, text string, attachments []PromptAttachment) error {
+	blocks := []acpsdk.ContentBlock{acpsdk.TextBlock(text)}
+	for _, a := range attachments {
+		b, ok := a.toContentBlock()
+		if !ok {
+			log.Printf("[acp] 跳过无法读取的附件 %q: %v", a.Name, a.Path)
+			continue
+		}
+		blocks = append(blocks, b)
+	}
 	_, err := c.conn().Prompt(ctx, acpsdk.PromptRequest{
 		SessionId: acpsdk.SessionId(sid),
-		Prompt:    []acpsdk.ContentBlock{acpsdk.TextBlock(text)},
+		Prompt:    blocks,
 	})
 	return err
+}
+
+// toContentBlock 把附件转成 ACP content block：图片内联 base64，其余用 file:// 资源链接。
+func (a PromptAttachment) toContentBlock() (acpsdk.ContentBlock, bool) {
+	if strings.HasPrefix(a.MimeType, "image/") {
+		data, err := os.ReadFile(a.Path)
+		if err != nil {
+			return acpsdk.ContentBlock{}, false
+		}
+		return acpsdk.ImageBlock(base64.StdEncoding.EncodeToString(data), a.MimeType), true
+	}
+	uri := a.Path
+	if !strings.HasPrefix(uri, "file://") {
+		uri = "file://" + a.Path
+	}
+	return acpsdk.ResourceLinkBlock(a.Name, uri), true
 }
 
 // Cancel 取消当前轮（notification，无 id，kimi 以 stopReason=cancelled 返回）。
