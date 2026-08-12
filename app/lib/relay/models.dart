@@ -45,10 +45,46 @@ class EditDiff {
   bool get isEmpty => lines.isEmpty;
 }
 
+/// 一个待发送/已发送附件（图片或任意文件）。
+/// 仅在本机有效：path 是绝对路径，relay 与 kimi 同机运行，可直接读取。
+class Attachment {
+  final String name;
+  final String? mimeType;
+  final String path; // 本机绝对路径
+  final bool isImage;
+  final int? size; // 字节
+
+  const Attachment({
+    required this.name,
+    this.mimeType,
+    required this.path,
+    required this.isImage,
+    this.size,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'name': name,
+        'mimeType': mimeType,
+        'path': path,
+        'isImage': isImage,
+        'size': size,
+      };
+
+  factory Attachment.fromJson(Map<String, dynamic> j) => Attachment(
+        name: j['name']?.toString() ?? '',
+        mimeType: j['mimeType']?.toString(),
+        path: j['path']?.toString() ?? '',
+        isImage: j['isImage'] == true,
+        size: j['size'] is int ? j['size'] as int : null,
+      );
+}
+
 /// 流里的一个内容块。流式累积，字段可变。
 class StreamBlock {
   final BlockKind kind;
   String text; // user / think / text
+  // 用户消息携带的附件（图片 / 文件）；其它类型块恒为空。
+  List<Attachment> attachments;
   // tool 专用
   String? toolCallId;
   String? toolName;
@@ -59,6 +95,7 @@ class StreamBlock {
   StreamBlock._(
     this.kind, {
     this.text = '',
+    this.attachments = const [],
     this.toolCallId,
     this.toolName,
     this.command,
@@ -66,7 +103,8 @@ class StreamBlock {
     this.output = '',
   });
 
-  factory StreamBlock.user(String t) => StreamBlock._(BlockKind.user, text: t);
+  factory StreamBlock.user(String t, [List<Attachment>? attachments]) =>
+      StreamBlock._(BlockKind.user, text: t, attachments: attachments ?? const []);
   factory StreamBlock.think(String t) =>
       StreamBlock._(BlockKind.think, text: t);
   factory StreamBlock.text(String t) => StreamBlock._(BlockKind.text, text: t);

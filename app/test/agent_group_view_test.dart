@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sentinel/relay/models.dart';
 import 'package:sentinel/theme/app_icons.dart';
+import 'package:sentinel/widgets/generating.dart';
 import 'package:sentinel/widgets/markdown.dart';
 import 'package:sentinel/widgets/stream_block.dart';
 
@@ -95,17 +96,37 @@ void main() {
       expect(find.text('No issues found!'), findsOneWidget);
     });
 
-    testWidgets('isRunning=true 时显示「思考中…」和一个 spinner', (tester) async {
-      final group = AgentGroup([
-        StreamBlock.think(''), // 空思考 → isRunning
-      ], headIndex: 0);
+    testWidgets('streaming 时用文字流光表达思考中，不再显示 spinner', (tester) async {
+      final group = AgentGroup([StreamBlock.think('')], headIndex: 0);
       await tester.pumpWidget(
         MaterialApp(
-          home: Scaffold(body: AgentGroupView(group: group)),
+          home: Scaffold(body: AgentGroupView(group: group, streaming: true)),
         ),
       );
       expect(find.text('思考中…'), findsOneWidget);
-      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      expect(find.byType(ActivityShimmerText), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+    });
+
+    testWidgets('当前组运行工具时，折叠行展示工具动作流光', (tester) async {
+      final group = AgentGroup([
+        StreamBlock.think('plan'),
+        StreamBlock.toolResult(
+          toolCallId: 'read-1',
+          name: 'Read',
+          command: r'D:\repo\lib\service.dart',
+          status: ToolStatus.running,
+        ),
+      ], headIndex: 0);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: AgentGroupView(group: group, streaming: true)),
+        ),
+      );
+
+      expect(find.text('正在读取文件 service.dart…'), findsOneWidget);
+      expect(find.byType(ActivityShimmerText), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
     });
 
     testWidgets('多 think + 多 tool 时按工具类型分别计数', (tester) async {
@@ -164,6 +185,44 @@ void main() {
   });
 
   group('StreamBlockView', () {
+    testWidgets('运行中的独立 tool 块用文字流光，完成后恢复静态', (tester) async {
+      final runningBlock = StreamBlock.toolResult(
+        toolCallId: 'bash-1',
+        name: 'Bash',
+        command: 'flutter test',
+        status: ToolStatus.running,
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 400,
+              child: StreamBlockView(block: runningBlock),
+            ),
+          ),
+        ),
+      );
+
+      expect(find.byType(ActivityShimmerText), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+
+      runningBlock.status = ToolStatus.done;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 400,
+              child: StreamBlockView(block: runningBlock),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byType(ActivityShimmerText), findsNothing);
+      expect(find.byIcon(AppIcons.check), findsOneWidget);
+    });
+
     testWidgets('独立 tool 块显示「动词 + 目标」与状态图标', (tester) async {
       // Bash 工具无 command 时退化为只显示动词「终端」。
       final block = StreamBlock.toolResult(

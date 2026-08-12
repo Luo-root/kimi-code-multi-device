@@ -3,6 +3,7 @@ package relay
 import (
 	"encoding/json"
 
+	"github.com/Luo-root/kimi-code-multi-device/relay/internal/acp"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/replay"
 	"github.com/Luo-root/kimi-code-multi-device/relay/internal/session"
 )
@@ -27,6 +28,7 @@ const (
 	DownSessionClosed  = "session.closed"  // 某活跃会话被关闭，端侧移除 tab
 	DownRelayConfig    = "relay.config"    // 中继运行配置快照（门铃/许可策略真实值）
 	DownSessionManaged = "session.managed" // 管理操作（archive/rename/fork/delete/restore/export）结果回执
+	DownEnhance        = "enhance_result"  // 提示词优化结果（original / enhanced / error）
 )
 
 // 会话管理动作（上行 session.manage 的 action 取值）。新增动作不改协议，旧端自然忽略。
@@ -57,11 +59,13 @@ const (
 	UpCloseSession  = "close_session"
 	UpConfigSet     = "config.set"     // 端侧改配置（bark/许可策略），中继应用+写回文件
 	UpManageSession = "session.manage" // 端侧发起会话管理操作（archive/rename/fork/delete/restore/export）
+	UpEnhance       = "enhance"        // 端侧请求 kimi 优化提示词（纯文本改写，不污染当前会话）
 )
 
 // 上行 payload
 type UpPromptPayload struct {
-	Text string `json:"text"`
+	Text        string                 `json:"text"`
+	Attachments []acp.PromptAttachment `json:"attachments,omitempty"`
 }
 type UpPermDecisionPayload struct {
 	PermissionID json.RawMessage `json:"permissionId"`
@@ -123,6 +127,18 @@ type DownSessionBusyPayload struct {
 }
 type DownRelayErrorPayload struct {
 	Message string `json:"message"`
+}
+
+// UpEnhancePayload 上行：请求优化一段提示词文本。
+type UpEnhancePayload struct {
+	Text string `json:"text"`
+}
+
+// DownEnhancePayload 下行：优化结果。Error 非空表示失败（kimi 不可达 / 无输出）。
+type DownEnhancePayload struct {
+	Original string `json:"original"`
+	Enhanced string `json:"enhanced"`
+	Error    string `json:"error,omitempty"`
 }
 
 // UpManageSessionPayload 端侧发起的会话管理操作。

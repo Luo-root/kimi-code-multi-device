@@ -22,7 +22,9 @@ abstract final class AppIcons {
   static const IconData ellipsis = LucideIcons.ellipsis; // 行内更多菜单
   static const IconData archive = LucideIcons.archive; // 归档
   static const IconData modelChip = LucideIcons.cpu; // 模型选择触发器
-  static const IconData thinking = LucideIcons.sparkles; // 思考强度
+  static const IconData thinking = LucideIcons.brain; // 思考强度（与 enhance 的 sparkles 区分）
+  static const IconData enhance = LucideIcons.sparkles; // 提示词优化（✨）
+  static const IconData revert = LucideIcons.rotate_ccw; // 提示词优化「还原」原输入
   static const IconData command = LucideIcons.command; // slash 命令菜单
   static const IconData search = LucideIcons.search; // 抽屉搜索
   static const IconData rename = LucideIcons.pencil; // 重命名工作区 / 会话
@@ -40,6 +42,9 @@ abstract final class AppIcons {
   static const IconData send = LucideIcons.arrow_up;
   static const IconData mic = LucideIcons.mic;
   static const IconData stop = LucideIcons.square;
+  static const IconData paperclip = LucideIcons.paperclip; // 附件
+  static const IconData image = LucideIcons.image; // 图片附件
+  static const IconData filePlus = LucideIcons.file_plus; // 文件附件
 
   // 流内容
   static const IconData terminal = LucideIcons.terminal;

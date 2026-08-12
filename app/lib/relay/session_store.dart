@@ -212,7 +212,10 @@ class SessionStore extends ChangeNotifier {
   StreamBlock _blockFromHistory(Map<String, dynamic> b) {
     switch (b['kind']) {
       case 'user':
-        return StreamBlock.user(b['text']?.toString() ?? '');
+        final atts = (b['attachments'] as List?)
+            ?.map((a) => Attachment.fromJson((a as Map).cast<String, dynamic>()))
+            .toList();
+        return StreamBlock.user(b['text']?.toString() ?? '', atts);
       case 'think':
         return StreamBlock.think(b['text']?.toString() ?? '');
       case 'text':
@@ -321,8 +324,9 @@ class SessionStore extends ChangeNotifier {
   }
 
   /// 用户发送：本地乐观追加 user 块（Kimi 的 update 流不回显用户消息）。
-  void addUser(String sid, String text) {
-    blocksOf(sid).add(StreamBlock.user(text));
+  /// [attachments] 为本次随消息上传的附件（图片 / 文件）。
+  void addUser(String sid, String text, [List<Attachment>? attachments]) {
+    blocksOf(sid).add(StreamBlock.user(text, attachments));
     notifyListeners();
   }
 

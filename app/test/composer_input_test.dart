@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:sentinel/screens/home_shell.dart';
 import 'package:sentinel/theme/app_dimens.dart';
+import 'package:sentinel/theme/app_icons.dart';
 import 'package:sentinel/theme/app_theme.dart';
 
 void main() {
@@ -30,7 +31,9 @@ void main() {
               onSend: (_) {},
               onStop: () {},
               onChanged: (_) {},
-              onOpenPlus: () {},
+              onAttachImage: () {},
+              onAttachFile: () {},
+              onEnhance: () {},
             ),
           ),
         ),
@@ -107,7 +110,8 @@ void main() {
   });
 
   testWidgets('窄屏下输入框不产生布局溢出，停止按钮也不位移', (tester) async {
-    await tester.pumpWidget(host(width: 180, running: true));
+    // 180dp 无法容纳「+ / 优化药丸 / 停止」三控件，故用贴近真机的窄屏 320dp 做溢出回归。
+    await tester.pumpWidget(host(width: 320, running: true));
     final stopBefore = tester.getRect(find.byKey(const ValueKey('composer-stop')));
 
     await enter(tester, '一段很长的中文内容用于测试窄屏换行\n第二行');
@@ -116,5 +120,270 @@ void main() {
     expect(stopAfter.bottom, greaterThan(stopBefore.bottom));
     expect(tester.takeException(), isNull);
     expect(find.byKey(const ValueKey('composer-stop')), findsOneWidget);
+  });
+
+  testWidgets('有文字输入时显示优化图标，enhanced 后变还原图标', (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.light(),
+      home: Scaffold(
+        body: Center(
+          child: SizedBox(
+            width: 420,
+            child: ComposerInputBar(
+              enabled: true,
+              running: false,
+              controller: controller,
+              onSend: (_) {},
+              onStop: () {},
+              onChanged: (_) {},
+              onAttachImage: () {},
+              onAttachFile: () {},
+              hasText: true,
+              enhancePhase: 'idle',
+              onEnhance: () {},
+            ),
+          ),
+        ),
+      ),
+    ));
+    expect(find.byIcon(AppIcons.enhance), findsOneWidget);
+
+    // 切换到 enhanced：图标变为「还原」。
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.light(),
+      home: Scaffold(
+        body: Center(
+          child: SizedBox(
+            width: 420,
+            child: ComposerInputBar(
+              enabled: true,
+              running: false,
+              controller: controller,
+              onSend: (_) {},
+              onStop: () {},
+              onChanged: (_) {},
+              onAttachImage: () {},
+              onAttachFile: () {},
+              hasText: true,
+              enhancePhase: 'enhanced',
+              onEnhance: () {},
+            ),
+          ),
+        ),
+      ),
+    ));
+    expect(find.byIcon(AppIcons.revert), findsOneWidget);
+    expect(find.byIcon(AppIcons.enhance), findsNothing);
+  });
+
+  testWidgets('无文字输入时隐藏优化图标', (tester) async {
+    await tester.pumpWidget(host()); // host 默认 hasText=false
+    expect(find.byIcon(AppIcons.enhance), findsNothing);
+
+    // 即便 phase 为 enhanced，无文字也应隐藏。
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.light(),
+      home: Scaffold(
+        body: Center(
+          child: SizedBox(
+            width: 420,
+            child: ComposerInputBar(
+              enabled: true,
+              running: false,
+              controller: controller,
+              onSend: (_) {},
+              onStop: () {},
+              onChanged: (_) {},
+              onAttachImage: () {},
+              onAttachFile: () {},
+              hasText: false,
+              enhancePhase: 'enhanced',
+              onEnhance: () {},
+            ),
+          ),
+        ),
+      ),
+    ));
+    expect(find.byIcon(AppIcons.revert), findsNothing);
+  });
+
+  testWidgets('真实输入经 onChanged 重建后图标出现/消失（回归 #hasText 不刷新）',
+      (tester) async {
+    // 复刻 _HomeShellState._onInputChanged：输入经 onChanged 更新 hasText 并重建。
+    // 旧实现里 onChanged 不触发 hasText 重建，导致输入文字后优化图标仍被隐藏。
+    bool hasText = false;
+    final widget = MaterialApp(
+      theme: AppTheme.light(),
+      home: Scaffold(
+        body: StatefulBuilder(
+          builder: (context, setState) => Center(
+            child: SizedBox(
+              width: 420,
+              child: ComposerInputBar(
+                enabled: true,
+                running: false,
+                controller: controller,
+                onSend: (_) {},
+                onStop: () {},
+                onChanged: (v) => setState(() => hasText = v.trim().isNotEmpty),
+                onAttachImage: () {},
+                onAttachFile: () {},
+                hasText: hasText,
+                enhancePhase: 'idle',
+                onEnhance: () {},
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpWidget(widget);
+    expect(find.byIcon(AppIcons.enhance), findsNothing);
+
+    // 输入文字 → 经 onChanged 重建 → 图标出现。
+    await tester.enterText(find.byKey(const ValueKey('composer-input')), 'foo');
+    await tester.pump();
+    expect(find.byIcon(AppIcons.enhance), findsOneWidget);
+
+    // 清空 → 图标再次隐藏。
+    await tester.enterText(find.byKey(const ValueKey('composer-input')), '');
+    await tester.pump();
+    expect(find.byIcon(AppIcons.enhance), findsNothing);
+  });
+
+  testWidgets('enhancing 阶段显示转圈（不论有无文字）', (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.light(),
+      home: Scaffold(
+        body: Center(
+          child: SizedBox(
+            width: 420,
+            child: ComposerInputBar(
+              enabled: true,
+              running: false,
+              controller: controller,
+              onSend: (_) {},
+              onStop: () {},
+              onChanged: (_) {},
+              onAttachImage: () {},
+              onAttachFile: () {},
+              hasText: false,
+              enhancePhase: 'enhancing',
+              onEnhance: () {},
+            ),
+          ),
+        ),
+      ),
+    ));
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.byIcon(AppIcons.enhance), findsNothing);
+  });
+
+  testWidgets('点击优化图标触发 onEnhance', (tester) async {
+    var called = false;
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.light(),
+      home: Scaffold(
+        body: Center(
+          child: SizedBox(
+            width: 420,
+            child: ComposerInputBar(
+              enabled: true,
+              running: false,
+              controller: controller,
+              onSend: (_) {},
+              onStop: () {},
+              onChanged: (_) {},
+              onAttachImage: () {},
+              onAttachFile: () {},
+              hasText: true,
+              enhancePhase: 'idle',
+              onEnhance: () => called = true,
+            ),
+          ),
+        ),
+      ),
+    ));
+    await tester.tap(find.byIcon(AppIcons.enhance));
+    await tester.pump();
+
+    expect(called, isTrue);
+  });
+
+  testWidgets('+ 按钮展开内联下拉菜单，显示图片和文件选项', (tester) async {
+    await tester.pumpWidget(host());
+    await tester.tap(find.byKey(const ValueKey('composer-plus')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('图片'), findsOneWidget);
+    expect(find.text('文件'), findsOneWidget);
+  });
+
+  testWidgets('选择下拉菜单中的图片项触发 onAttachImage', (tester) async {
+    var imageCalled = false;
+    var fileCalled = false;
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.light(),
+      home: Scaffold(
+        body: Center(
+          child: SizedBox(
+            width: 420,
+            child: ComposerInputBar(
+              enabled: true,
+              running: false,
+              controller: controller,
+              onSend: (_) {},
+              onStop: () {},
+              onChanged: (_) {},
+              onAttachImage: () => imageCalled = true,
+              onAttachFile: () => fileCalled = true,
+              onEnhance: () {},
+            ),
+          ),
+        ),
+      ),
+    ));
+
+    await tester.tap(find.byKey(const ValueKey('composer-plus')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('图片'));
+    await tester.pumpAndSettle();
+
+    expect(imageCalled, isTrue);
+    expect(fileCalled, isFalse);
+  });
+
+  testWidgets('选择下拉菜单中的文件项触发 onAttachFile', (tester) async {
+    var imageCalled = false;
+    var fileCalled = false;
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.light(),
+      home: Scaffold(
+        body: Center(
+          child: SizedBox(
+            width: 420,
+            child: ComposerInputBar(
+              enabled: true,
+              running: false,
+              controller: controller,
+              onSend: (_) {},
+              onStop: () {},
+              onChanged: (_) {},
+              onAttachImage: () => imageCalled = true,
+              onAttachFile: () => fileCalled = true,
+              onEnhance: () {},
+            ),
+          ),
+        ),
+      ),
+    ));
+
+    await tester.tap(find.byKey(const ValueKey('composer-plus')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('文件'));
+    await tester.pumpAndSettle();
+
+    expect(imageCalled, isFalse);
+    expect(fileCalled, isTrue);
   });
 }

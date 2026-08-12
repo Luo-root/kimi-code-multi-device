@@ -1,5 +1,9 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../relay/models.dart';
+import '../theme/app_dimens.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
 import '../theme/app_icons.dart';
@@ -59,6 +63,7 @@ class _StreamBlockViewState extends State<StreamBlockView> {
 
   /// §UX-2.2：用户气泡不带复制按钮（自己发的话无需复制入口）。
   Widget _user() {
+    final atts = widget.block.attachments;
     return Row(
       mainAxisAlignment: MainAxisAlignment.end,
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -72,10 +77,95 @@ class _StreamBlockViewState extends State<StreamBlockView> {
               color: AppColors.quietSurfaceOf(context),
               borderRadius: BorderRadius.circular(16),
             ),
-            child: Text(widget.block.text, style: AppText.body),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                if (atts.isNotEmpty) ...[
+                  _userAttachments(atts),
+                  const SizedBox(height: 8),
+                ],
+                if (widget.block.text.trim().isNotEmpty)
+                  Text(widget.block.text, style: AppText.body),
+              ],
+            ),
           ),
         ),
       ],
+    );
+  }
+
+  /// 用户消息里的附件：图片缩略网格 + 文件片（点击用默认程序打开）。
+  Widget _userAttachments(List<Attachment> atts) {
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      alignment: WrapAlignment.end,
+      children: [
+        for (final a in atts)
+          a.isImage
+              ? _tapOpen(
+                  a,
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(AppRadius.thumbnail),
+                    child: Image.file(
+                      File(a.path),
+                      width: 96,
+                      height: 96,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, _, _) => Container(
+                        width: 96,
+                        height: 96,
+                        color: AppColors.surfaceOf(context),
+                        child: Icon(AppIcons.image,
+                            size: 28,
+                            color: AppColors.textSecondaryOf(context)),
+                      ),
+                    ),
+                  ),
+                )
+              : _tapOpen(
+                  a,
+                  Container(
+                    constraints: const BoxConstraints(minWidth: 120, maxWidth: 200),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: AppColors.surfaceOf(context),
+                      borderRadius: BorderRadius.circular(AppRadius.pill),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(AppIcons.file,
+                            size: 16,
+                            color: AppColors.textSecondaryOf(context)),
+                        const SizedBox(width: 6),
+                        Flexible(
+                          child: Text(
+                            a.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: AppText.monoCaption,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+      ],
+    );
+  }
+
+  /// 包裹附件，点击用系统默认程序打开（best-effort）。
+  Widget _tapOpen(Attachment a, Widget child) {
+    return GestureDetector(
+      onTap: () {
+        final uri = Uri.file(a.path);
+        // 打开失败静默忽略：附件展示本身不依赖此交互。
+        launchUrl(uri).catchError((_) => false);
+      },
+      child: child,
     );
   }
 
@@ -102,21 +192,18 @@ class _StreamBlockViewState extends State<StreamBlockView> {
             children: [
               Icon(AppIcons.thinking, size: 14, color: triggerColor),
               const SizedBox(width: 8),
-              Text(
-                streaming ? '思考中…' : '思考',
-                style: AppText.callout.copyWith(color: triggerColor),
-              ),
-              if (streaming) ...[
-                const SizedBox(width: 6),
-                SizedBox(
-                  width: 12,
-                  height: 12,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: AppColors.think,
-                  ),
+              if (streaming)
+                ActivityShimmerText(
+                  '思考中…',
+                  key: const ValueKey('thinking-activity-shimmer'),
+                  style: AppText.callout.copyWith(color: triggerColor),
+                  baseColor: AppColors.placeholderOf(context),
+                )
+              else
+                Text(
+                  '思考',
+                  style: AppText.callout.copyWith(color: triggerColor),
                 ),
-              ],
               const SizedBox(width: 6),
               Icon(
                 _open ? AppIcons.chevronDown : AppIcons.chevronRight,
@@ -174,24 +261,25 @@ class _StreamBlockViewState extends State<StreamBlockView> {
               ),
               const SizedBox(width: 8),
               Flexible(
-                child: Text(
-                  displayText,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: AppText.mono.copyWith(color: triggerColor),
-                ),
+                child: b.status == ToolStatus.running
+                    ? ActivityShimmerText(
+                        displayText,
+                        key: ValueKey(
+                            'tool-activity-shimmer-${b.toolCallId ?? displayText}'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: AppText.mono.copyWith(color: triggerColor),
+                        baseColor: AppColors.placeholderOf(context),
+                      )
+                    : Text(
+                        displayText,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: AppText.mono.copyWith(color: triggerColor),
+                      ),
               ),
               const SizedBox(width: 12),
-              if (b.status == ToolStatus.running)
-                SizedBox(
-                  width: 12,
-                  height: 12,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: AppColors.accentOf(context),
-                  ),
-                )
-              else if (b.status == ToolStatus.failed)
+              if (b.status == ToolStatus.failed)
                 Icon(
                   AppIcons.close,
                   size: 13,
@@ -262,7 +350,7 @@ class _AgentGroupViewState extends State<AgentGroupView> {
     final triggerColor = _hover
         ? AppColors.textPrimaryOf(context)
         : AppColors.placeholderOf(context);
-    final label = g.isRunning ? '思考中…' : _groupLabel(g);
+    final label = widget.streaming ? _activeGroupLabel(g) : _groupLabel(g);
 
     final trigger = MouseRegion(
       cursor: SystemMouseCursors.click,
@@ -279,24 +367,22 @@ class _AgentGroupViewState extends State<AgentGroupView> {
               Icon(AppIcons.thinking, size: 14, color: triggerColor),
               const SizedBox(width: 8),
               Flexible(
-                child: Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: AppText.callout.copyWith(color: triggerColor),
-                ),
+                child: widget.streaming && !_open
+                    ? ActivityShimmerText(
+                        label,
+                        key: const ValueKey('agent-group-activity-shimmer'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: AppText.callout.copyWith(color: triggerColor),
+                        baseColor: AppColors.placeholderOf(context),
+                      )
+                    : Text(
+                        label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: AppText.callout.copyWith(color: triggerColor),
+                      ),
               ),
-              if (g.isRunning) ...[
-                const SizedBox(width: 6),
-                SizedBox(
-                  width: 12,
-                  height: 12,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: AppColors.think,
-                  ),
-                ),
-              ],
               const SizedBox(width: 6),
               Icon(
                 _open ? AppIcons.chevronDown : AppIcons.chevronRight,
@@ -319,7 +405,10 @@ class _AgentGroupViewState extends State<AgentGroupView> {
           for (var i = 0; i < g.parts.length; i++) ...[
             if (i > 0) const SizedBox(height: 2),
             if (g.parts[i].kind == BlockKind.think)
-              _InlineThinkRow(think: g.parts[i])
+              _InlineThinkRow(
+                think: g.parts[i],
+                active: widget.streaming && _isActivePart(g, i),
+              )
             else if (g.parts[i].kind == BlockKind.tool)
               _InlineToolRow(tool: g.parts[i]),
           ],
@@ -327,6 +416,35 @@ class _AgentGroupViewState extends State<AgentGroupView> {
       ),
     );
     return Collapsible(open: _open, trigger: trigger, content: content);
+  }
+
+  static bool _isActivePart(AgentGroup g, int index) {
+    final part = g.parts[index];
+    if (part.kind == BlockKind.tool) {
+      return part.status == ToolStatus.running;
+    }
+    if (part.kind != BlockKind.think) return false;
+    for (var i = index + 1; i < g.parts.length; i++) {
+      final later = g.parts[i];
+      if (later.kind == BlockKind.tool && later.status == ToolStatus.running) {
+        return false;
+      }
+    }
+    return index == g.parts.length - 1;
+  }
+
+  /// 当前组的执行文案：优先展示最后一个正在运行的工具；尚无工具时显示思考。
+  static String _activeGroupLabel(AgentGroup g) {
+    for (var i = g.tools.length - 1; i >= 0; i--) {
+      final tool = g.tools[i];
+      if (tool.status != ToolStatus.running) continue;
+      final action = toolActionLabel(tool.toolName ?? 'tool', tool.command ?? '');
+      final display = action.target.isEmpty
+          ? action.verb
+          : '${action.verb} ${action.target}';
+      return '正在$display…';
+    }
+    return '思考中…';
   }
 
   /// 折叠态标签：按工具类型分组的可读总结。
@@ -423,29 +541,32 @@ class _InlineToolRowState extends State<_InlineToolRow> {
               ),
               const SizedBox(width: 8),
               Flexible(
-                child: Text(
-                  displayText,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: AppText.mono.copyWith(
-                    fontSize: 13,
-                    color: triggerColor,
-                  ),
-                ),
+                child: b.status == ToolStatus.running
+                    ? ActivityShimmerText(
+                        displayText,
+                        key: ValueKey(
+                            'inline-tool-activity-shimmer-${b.toolCallId ?? displayText}'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: AppText.mono.copyWith(
+                          fontSize: 13,
+                          color: triggerColor,
+                        ),
+                        baseColor: AppColors.placeholderOf(context),
+                      )
+                    : Text(
+                        displayText,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: AppText.mono.copyWith(
+                          fontSize: 13,
+                          color: triggerColor,
+                        ),
+                      ),
               ),
               const SizedBox(width: 8),
-              // 状态：进行中转 spinner；失败用 ×（红色）；其余状态省略，
-              // 让列表整体保持克制（截图里展开的列表项不显式标完成）。
-              if (b.status == ToolStatus.running)
-                SizedBox(
-                  width: 11,
-                  height: 11,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: AppColors.accentOf(context),
-                  ),
-                )
-              else if (b.status == ToolStatus.failed)
+              // 运行态由文字流光表达；失败用 ×，完成保持克制不显式标注。
+              if (b.status == ToolStatus.failed)
                 Icon(
                   AppIcons.close,
                   size: 12,
@@ -479,7 +600,8 @@ class _InlineToolRowState extends State<_InlineToolRow> {
 /// （银灰→黑 hover、chevron 在右），默认折叠，点击才展开思考文本。
 class _InlineThinkRow extends StatefulWidget {
   final StreamBlock think;
-  const _InlineThinkRow({required this.think});
+  final bool active;
+  const _InlineThinkRow({required this.think, this.active = false});
 
   @override
   State<_InlineThinkRow> createState() => _InlineThinkRowState();
@@ -492,7 +614,7 @@ class _InlineThinkRowState extends State<_InlineThinkRow> {
   @override
   Widget build(BuildContext context) {
     final b = widget.think;
-    final streaming = b.text.trim().isEmpty;
+    final streaming = widget.active;
     final triggerColor = _hover
         ? AppColors.textPrimaryOf(context)
         : AppColors.placeholderOf(context);
@@ -510,21 +632,18 @@ class _InlineThinkRowState extends State<_InlineThinkRow> {
             children: [
               Icon(AppIcons.thinking, size: 14, color: triggerColor),
               const SizedBox(width: 8),
-              Text(
-                streaming ? '思考中…' : '思考',
-                style: AppText.callout.copyWith(color: triggerColor),
-              ),
-              if (streaming) ...[
-                const SizedBox(width: 6),
-                SizedBox(
-                  width: 12,
-                  height: 12,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: AppColors.think,
-                  ),
+              if (streaming)
+                ActivityShimmerText(
+                  '思考中…',
+                  key: const ValueKey('thinking-activity-shimmer'),
+                  style: AppText.callout.copyWith(color: triggerColor),
+                  baseColor: AppColors.placeholderOf(context),
+                )
+              else
+                Text(
+                  '思考',
+                  style: AppText.callout.copyWith(color: triggerColor),
                 ),
-              ],
               const SizedBox(width: 6),
               Icon(
                 _open ? AppIcons.chevronDown : AppIcons.chevronRight,

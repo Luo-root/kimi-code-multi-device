@@ -35,7 +35,7 @@ type acpClient interface {
 	NewSession(ctx context.Context, cwd string) (acpsdk.SessionId, []acpsdk.SessionConfigOption, error)
 	ListSessions(ctx context.Context) ([]acpsdk.SessionInfo, error)
 	ResumeSession(ctx context.Context, sid, cwd string) ([]acpsdk.SessionConfigOption, error)
-	Prompt(ctx context.Context, sid, text string) error
+	Prompt(ctx context.Context, sid, text string, attachments []acp.PromptAttachment) error
 	Cancel(ctx context.Context, sid string) error
 	SetMode(ctx context.Context, sid, modeID string) error
 	SetConfigOption(ctx context.Context, sid, configID, value string) error
@@ -86,6 +86,11 @@ type Relay struct {
 
 	mu      sync.RWMutex
 	clients map[*client]bool
+
+	// enhanceSessions 记录中继内部为「提示词优化」临时起的 kimi 会话 id。
+	// 这些会话的 session/update 只入 store、不广播给端侧，避免污染聊天历史。
+	enhanceMu       sync.Mutex
+	enhanceSessions map[string]struct{}
 }
 
 // permOutcome 是阻塞中的 OnPermission 回调等待的裁决结果。
@@ -124,6 +129,7 @@ func New() *Relay {
 		permTimeout:         time.Duration(cfg.Permission.TimeoutSeconds) * time.Second,
 		autoPassNonCritical: cfg.Permission.AutoPassNonCritical,
 		permWaiters:         map[string]chan permOutcome{},
+		enhanceSessions:     map[string]struct{}{},
 	}
 	r.permit = permit.New(r.onPermTimeout)
 	r.initManagement()
@@ -379,7 +385,115 @@ func (r *Relay) onUpdate(sid string, update json.RawMessage) {
 		r.store.SetConfig(sid, probe.ConfigOptions)
 	}
 	r.store.AppendUpdate(sid, update)
+	// 内部增强会话：仅落 store，不广播给端侧（避免污染聊天历史）。
+	if r.isEnhanceSession(sid) {
+		return
+	}
 	r.broadcast(Env{Type: DownSessionUpdate, SessionID: sid, Payload: update})
+}
+
+// isEnhanceSession 报告该 sid 是否为中继内部「提示词优化」临时会话。
+func (r *Relay) isEnhanceSession(sid string) bool {
+	if sid == "" {
+		return false
+	}
+	r.enhanceMu.Lock()
+	_, ok := r.enhanceSessions[sid]
+	r.enhanceMu.Unlock()
+	return ok
+}
+
+// runEnhance 起一个临时 kimi 会话，让其把原始提示词改写成更清晰的版本，
+// 完成后从 assistant_message_chunk 回读文本并下行给端侧，最后清理临时会话。
+// 整个流程不污染端侧当前聊天：临时会话的 update 在 onUpdate 中被拦截广播。
+func (r *Relay) runEnhance(sid, text string) {
+	fail := func(msg string) {
+		r.broadcast(Env{Type: DownEnhance, Payload: mustJSON(DownEnhancePayload{Error: msg})})
+	}
+	if !r.kimiAlive {
+		fail("kimi 未连接，无法优化提示词")
+		return
+	}
+	if strings.TrimSpace(text) == "" {
+		fail("提示词为空")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	cwd := r.store.CWD(sid)
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	newSid, _, err := r.acp.NewSession(ctx, cwd)
+	if err != nil {
+		fail("enhance: new session: " + err.Error())
+		return
+	}
+	enhanceID := string(newSid)
+	r.enhanceMu.Lock()
+	r.enhanceSessions[enhanceID] = struct{}{}
+	r.enhanceMu.Unlock()
+	// 清理：移出拦截集合并删掉 store 中临时会话（避免泄漏 / 历史污染）。
+	defer func() {
+		r.enhanceMu.Lock()
+		delete(r.enhanceSessions, enhanceID)
+		r.enhanceMu.Unlock()
+		r.store.Remove(enhanceID)
+	}()
+
+	instruction := "你是提示词优化器。只输出优化后的提示词本身，不要任何解释、前后缀或 markdown 代码块。" +
+		"把下面这段用户提示词改写成更清晰、更具体、更易于 AI 理解执行的版本：\n\n" + text
+	if err := r.acp.Prompt(ctx, enhanceID, instruction, nil); err != nil {
+		fail("enhance: " + err.Error())
+		return
+	}
+	enhanced := extractEnhanced(r.store.Tail(enhanceID))
+	if strings.TrimSpace(enhanced) == "" {
+		fail("未获取到优化结果")
+		return
+	}
+	r.broadcast(Env{Type: DownEnhance, Payload: mustJSON(DownEnhancePayload{
+		Original: text,
+		Enhanced: enhanced,
+	})})
+}
+
+// extractEnhanced 从会话 update 流中拼出 kimi 的优化后文本。
+// 优先取 assistant_message_chunk（最终回答），仅当完全没有时才退回 agent_message_chunk。
+//
+// ⚠️ 真实 kimi 的 chunk 文本嵌套在 content.text（与 Flutter _chunkText 同源：
+// u['content']['text']），不是扁平 top-level text。早期版本读扁平 text 导致
+// 真机下永远取不到内容、enhance 静默报「未获取到优化结果」。这里两种写法都兼容，
+// 但真实结构必须是 content.text。
+func extractEnhanced(updates []json.RawMessage) string {
+	var main, fallback strings.Builder
+	for _, u := range updates {
+		var m struct {
+			SessionUpdate string `json:"sessionUpdate"`
+			Content       struct {
+				Text string `json:"text"`
+			} `json:"content"`
+			Text string `json:"text"` // 兼容少数版本的扁平写法
+		}
+		if json.Unmarshal(u, &m) != nil {
+			continue
+		}
+		t := m.Content.Text
+		if t == "" {
+			t = m.Text
+		}
+		switch m.SessionUpdate {
+		case "assistant_message_chunk":
+			main.WriteString(t)
+		case "agent_message_chunk":
+			fallback.WriteString(t)
+		}
+	}
+	if main.Len() > 0 {
+		return strings.TrimSpace(main.String())
+	}
+	return strings.TrimSpace(fallback.String())
 }
 
 // onPermission 是 SDK 的同步权限回调：kimi 每次请求权限都会阻塞在此，直到本函数返回
@@ -388,6 +502,10 @@ func (r *Relay) onUpdate(sid string, update json.RawMessage) {
 // 由 UpPermDecision（端侧决定）或 onPermTimeout（超时代答）或 onKimiExit（进程退出）唤醒。
 func (r *Relay) onPermission(ctx context.Context, req acpsdk.RequestPermissionRequest) (acpsdk.RequestPermissionResponse, error) {
 	sid := string(req.SessionId)
+	// 增强会话是纯文本改写任务，自动放行，避免 manual 模式下卡死。
+	if r.isEnhanceSession(sid) {
+		return permResponse("approve_once"), nil
+	}
 	toolCall := mustJSON(req.ToolCall)
 	options := mustJSON(req.Options)
 	command := extractCommand(toolCall)
@@ -760,7 +878,7 @@ func (r *Relay) handleUp(c *client, data []byte) {
 			start := time.Now()
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			defer cancel()
-			err := r.acp.Prompt(ctx, sid, p.Text)
+			err := r.acp.Prompt(ctx, sid, p.Text, p.Attachments)
 			elapsed := time.Since(start)
 			// busy 结束：输出完毕（成功或出错都算跑完），「停」退场。
 			r.store.SetBusy(sid, false)
@@ -776,6 +894,10 @@ func (r *Relay) handleUp(c *client, data []byte) {
 				r.bark.Notify("SENTINEL", "长任务跑完了")
 			}
 		}()
+	case UpEnhance:
+		var p UpEnhancePayload
+		_ = json.Unmarshal(e.Payload, &p)
+		go r.runEnhance(e.SessionID, p.Text)
 	case UpCancel:
 		sid := e.SessionID
 		go func() {
