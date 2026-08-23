@@ -409,7 +409,7 @@ void main() {
       ),
     ));
     await tester.enterText(find.byKey(const ValueKey('composer-input')), '软键盘发送');
-    tester.testTextInput.receiveAction(TextInputAction.send);
+    await tester.testTextInput.receiveAction(TextInputAction.send);
     await tester.pump();
     expect(submitted, '软键盘发送');
   });
