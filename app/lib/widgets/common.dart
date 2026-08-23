@@ -274,8 +274,15 @@ class CopyButton extends StatefulWidget {
   final String text;
   final bool dark;
   final bool plain;
+  /// 为 true 时命中行为改为 translucent：让下方的选区拖选能"穿过"本按钮，
+  /// 不被 44×44 的命中区截断（用于覆盖在可选中文本之上的代码块复制按钮）。
+  final bool translucent;
   const CopyButton(
-      {super.key, required this.text, this.dark = false, this.plain = false});
+      {super.key,
+      required this.text,
+      this.dark = false,
+      this.plain = false,
+      this.translucent = false});
 
   @override
   State<CopyButton> createState() => _CopyButtonState();
@@ -313,7 +320,9 @@ class _CopyButtonState extends State<CopyButton> {
         ? (_done ? AppColors.approve : const Color(0xFFC7C7CC))
         : (_done ? AppColors.approve : AppColors.textSecondaryOf(context));
     return GestureDetector(
-      behavior: HitTestBehavior.opaque,
+      behavior: widget.translucent
+          ? HitTestBehavior.translucent
+          : HitTestBehavior.opaque,
       onTap: _copy,
       // 命中区域 44×44，视觉居中 30px。
       child: SizedBox(

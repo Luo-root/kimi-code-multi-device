@@ -3097,10 +3097,98 @@ class _EnhancePill extends StatelessWidget {
 /// composer + 按钮下拉菜单项。
 enum _AttachMenuItem { image, file }
 
+class ComposerTextField extends StatelessWidget {
+  final bool enabled;
+  final bool running;
+  final TextEditingController controller;
+  final FocusNode? focusNode;
+  final ValueChanged<String> onSubmit;
+  final ValueChanged<String> onChanged;
+
+  const ComposerTextField({
+    super.key,
+    required this.enabled,
+    required this.running,
+    required this.controller,
+    this.focusNode,
+    required this.onSubmit,
+    required this.onChanged,
+  });
+
+  bool get _isComposing {
+    final composing = controller.value.composing;
+    return composing.isValid && !composing.isCollapsed;
+  }
+
+  void _submit() {
+    if (!enabled || running || _isComposing) return;
+    onSubmit(controller.text);
+  }
+
+  void _insertNewline() {
+    if (!enabled || _isComposing) return;
+    final value = controller.value;
+    final selection = value.selection.isValid
+        ? value.selection
+        : TextSelection.collapsed(offset: value.text.length);
+    final text = value.text.replaceRange(selection.start, selection.end, '\n');
+    controller.value = value.copyWith(
+      text: text,
+      selection: TextSelection.collapsed(offset: selection.start + 1),
+      composing: TextRange.empty,
+    );
+    onChanged(text);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return CallbackShortcuts(
+      bindings: <ShortcutActivator, VoidCallback>{
+        const SingleActivator(LogicalKeyboardKey.enter, shift: true):
+            _insertNewline,
+        const SingleActivator(LogicalKeyboardKey.enter): _submit,
+      },
+      child: TextField(
+        key: const ValueKey('composer-input'),
+        controller: controller,
+        focusNode: focusNode,
+        enabled: enabled,
+        style: AppText.body,
+        minLines: _kComposerMinLines,
+        maxLines: _kComposerMaxLines,
+        keyboardType: TextInputType.multiline,
+        textInputAction: TextInputAction.send,
+        autocorrect: false,
+        enableSuggestions: false,
+        textCapitalization: TextCapitalization.none,
+        onChanged: onChanged,
+        // 移动端软键盘与桌面 Enter 共用同一入口，统一执行 running / IME
+        // composing 保护，避免候选词确认时误发送。
+        onSubmitted: (_) => _submit(),
+        decoration: InputDecoration(
+          isCollapsed: true,
+          border: InputBorder.none,
+          enabledBorder: InputBorder.none,
+          focusedBorder: InputBorder.none,
+          disabledBorder: InputBorder.none,
+          errorBorder: InputBorder.none,
+          focusedErrorBorder: InputBorder.none,
+          hintText: enabled ? '尽管问…' : '先连接中继',
+          hintStyle: AppText.placeholder,
+          contentPadding: const EdgeInsets.symmetric(
+            vertical: _kComposerVerticalPadding,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class ComposerInputBar extends StatelessWidget {
   final bool enabled;
   final bool running;
   final TextEditingController controller;
+  final FocusNode? focusNode;
   final ValueChanged<String> onSend;
   final VoidCallback onStop;
   final ValueChanged<String> onChanged;
@@ -3114,6 +3202,7 @@ class ComposerInputBar extends StatelessWidget {
     required this.enabled,
     required this.running,
     required this.controller,
+    this.focusNode,
     required this.onSend,
     required this.onStop,
     required this.onChanged,
@@ -3125,32 +3214,6 @@ class ComposerInputBar extends StatelessWidget {
   });
   @override
   Widget build(BuildContext context) {
-    void submitFromKeyboard() {
-      if (running) return;
-      final value = controller.value;
-      // 中文输入法正在组合候选词时，Enter 是确认候选，不应发送消息。
-      if (value.composing.isValid && !value.composing.isCollapsed) return;
-      onSend(value.text);
-    }
-
-    void insertNewline() {
-      final value = controller.value;
-      // Shift+Enter 在输入法组合态下交给 IME，避免破坏候选词。
-      if (value.composing.isValid && !value.composing.isCollapsed) return;
-      final selection = value.selection.isValid
-          ? value.selection
-          : TextSelection.collapsed(offset: value.text.length);
-      final start = selection.start;
-      final end = selection.end;
-      final text = value.text.replaceRange(start, end, '\\n');
-      controller.value = value.copyWith(
-        text: text,
-        selection: TextSelection.collapsed(offset: start + 1),
-        composing: TextRange.empty,
-      );
-      onChanged(text);
-    }
-
     // 药丸形 composer：使用主内容专属 quietSurface，而非更重的通用 keyCap；
     // 保留轮廓和聚焦感，但避免与快捷 chips、画布叠成连续灰块。
     // 三键（+ / send / stop）统一用 Material+InkWell 圆形，与外层药丸视觉对齐。
@@ -3224,47 +3287,13 @@ class ComposerInputBar extends StatelessWidget {
           ),
           const SizedBox(width: AppSpacing.sm),
           Expanded(
-            child: CallbackShortcuts(
-              bindings: <ShortcutActivator, VoidCallback>{
-                SingleActivator(LogicalKeyboardKey.enter, shift: true):
-                    insertNewline,
-                SingleActivator(LogicalKeyboardKey.enter): submitFromKeyboard,
-              },
-              child: TextField(
-                controller: controller,
+            child: ComposerTextField(
               enabled: enabled,
-              style: AppText.body,
-              key: const ValueKey('composer-input'),
-              // 多行：写代码/长指令不被压成一行；达到 6 行后仅在输入区内滚动。
-              minLines: _kComposerMinLines,
-              maxLines: _kComposerMaxLines,
-              keyboardType: TextInputType.multiline,
-              textInputAction: TextInputAction.send,
-              // 代码 agent：关闭自动纠错/自动大写，避免被改词。
-              autocorrect: false,
-              enableSuggestions: false,
-              textCapitalization: TextCapitalization.none,
+              running: running,
+              controller: controller,
+              focusNode: focusNode,
+              onSubmit: onSend,
               onChanged: onChanged,
-              // 移动端软键盘的发送 action 仍走 onSubmitted；桌面端的
-              // Enter/Shift+Enter 通过 Shortcuts 在 TextField 外显式分流。
-              onSubmitted: onSend,
-              decoration: InputDecoration(
-                isCollapsed: true,
-                border: InputBorder.none,
-                // 主题默认会给 InputDecorationTheme 一个 enabledBorder 描边，
-                // 这里在 composer 里彻底关掉，否则会看到内嵌一圈淡灰线条。
-                enabledBorder: InputBorder.none,
-                focusedBorder: InputBorder.none,
-                disabledBorder: InputBorder.none,
-                errorBorder: InputBorder.none,
-                focusedErrorBorder: InputBorder.none,
-                hintText: enabled ? '尽管问…' : '先连接中继',
-                hintStyle: AppText.placeholder,
-                contentPadding: const EdgeInsets.symmetric(
-                  vertical: _kComposerVerticalPadding,
-                ),
-                ),
-              ),
             ),
           ),
           const SizedBox(width: AppSpacing.sm),
