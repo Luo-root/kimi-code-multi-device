@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:sentinel/screens/home_shell.dart';
@@ -308,6 +309,109 @@ void main() {
     await tester.pump();
 
     expect(called, isTrue);
+  });
+
+  testWidgets('Enter 发送，Shift+Enter 插入真实换行并保留焦点', (tester) async {
+    String? submitted;
+    String? changed;
+    final focusNode = FocusNode();
+    addTearDown(focusNode.dispose);
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.light(),
+      home: Scaffold(
+        body: ComposerTextField(
+          enabled: true,
+          running: false,
+          controller: controller,
+          focusNode: focusNode,
+          onSubmit: (value) => submitted = value,
+          onChanged: (value) => changed = value,
+        ),
+      ),
+    ));
+
+    await tester.enterText(find.byKey(const ValueKey('composer-input')), '第一行');
+    focusNode.requestFocus();
+    await tester.pump();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shift);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shift);
+    await tester.pump();
+
+    expect(controller.text, '第一行\n');
+    expect(changed, '第一行\n');
+    expect(submitted, isNull);
+    expect(focusNode.hasFocus, isTrue);
+
+    await tester.enterText(find.byKey(const ValueKey('composer-input')), '准备发送');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
+    expect(submitted, '准备发送');
+  });
+
+  testWidgets('IME composing 或运行中时 Enter 不发送', (tester) async {
+    var submissions = 0;
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.light(),
+      home: Scaffold(
+        body: ComposerTextField(
+          enabled: true,
+          running: false,
+          controller: controller,
+          onSubmit: (_) => submissions++,
+          onChanged: (_) {},
+        ),
+      ),
+    ));
+    controller.value = const TextEditingValue(
+      text: '拼音',
+      selection: TextSelection.collapsed(offset: 2),
+      composing: TextRange(start: 0, end: 2),
+    );
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('composer-input')));
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    expect(submissions, 0);
+
+    controller.value = const TextEditingValue(
+      text: '已完成',
+      selection: TextSelection.collapsed(offset: 3),
+    );
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.light(),
+      home: Scaffold(
+        body: ComposerTextField(
+          enabled: true,
+          running: true,
+          controller: controller,
+          onSubmit: (_) => submissions++,
+          onChanged: (_) {},
+        ),
+      ),
+    ));
+    await tester.tap(find.byKey(const ValueKey('composer-input')));
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    expect(submissions, 0);
+  });
+
+  testWidgets('软键盘 onSubmitted 与 Enter 共用 IME 和运行态保护', (tester) async {
+    String? submitted;
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.light(),
+      home: Scaffold(
+        body: ComposerTextField(
+          enabled: true,
+          running: false,
+          controller: controller,
+          onSubmit: (value) => submitted = value,
+          onChanged: (_) {},
+        ),
+      ),
+    ));
+    await tester.enterText(find.byKey(const ValueKey('composer-input')), '软键盘发送');
+    await tester.testTextInput.receiveAction(TextInputAction.send);
+    await tester.pump();
+    expect(submitted, '软键盘发送');
   });
 
   testWidgets('+ 按钮展开内联下拉菜单，显示图片和文件选项', (tester) async {
